@@ -3,9 +3,12 @@ import type { AgentConfig } from "../config/schema.js";
 import type { SlackCredentials } from "../config/load-config.js";
 import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
+import type { RpcRecord } from "../pi/rpc-client.js";
 import { parseMessageEvent } from "./parse-event.js";
+import { PiProgressTranscript } from "./pi-progress.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
+const SLACK_PROGRESS_INTERVAL_MS = 1_000;
 
 function chunks(text: string): string[] {
   if (text.length <= SLACK_CHUNK_LIMIT) return [text];
@@ -14,6 +17,77 @@ function chunks(text: string): string[] {
     result.push(text.slice(offset, offset + SLACK_CHUNK_LIMIT));
   }
   return result;
+}
+
+class SlackProgressReporter {
+  readonly #transcript = new PiProgressTranscript();
+  readonly #update: (text: string) => Promise<void>;
+  readonly #onError: (error: unknown) => void;
+  #updates: Promise<void> = Promise.resolve();
+  #timer: NodeJS.Timeout | undefined;
+  #lastUpdateAt = 0;
+  #pending = false;
+  #closed = false;
+
+  constructor(
+    update: (text: string) => Promise<void>,
+    onError: (error: unknown) => void,
+  ) {
+    this.#update = update;
+    this.#onError = onError;
+  }
+
+  record(event: RpcRecord): void {
+    if (this.#closed || !this.#transcript.record(event)) return;
+    this.#pending = true;
+    this.#schedule();
+  }
+
+  async complete(): Promise<void> {
+    this.#closed = true;
+    if (this.#timer) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#pending = false;
+    await this.#updates;
+    await this.#runUpdate(this.#transcript.render("completed"));
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+    if (this.#timer) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#pending = false;
+    await this.#updates;
+  }
+
+  #schedule(): void {
+    if (this.#timer || this.#closed) return;
+    const delay = Math.max(
+      0,
+      SLACK_PROGRESS_INTERVAL_MS - (Date.now() - this.#lastUpdateAt),
+    );
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      this.#flush();
+    }, delay);
+    this.#timer.unref();
+  }
+
+  #flush(): void {
+    if (!this.#pending || this.#closed) return;
+    this.#pending = false;
+    this.#lastUpdateAt = Date.now();
+    this.#updates = this.#runUpdate(this.#transcript.render("working"));
+  }
+
+  async #runUpdate(text: string): Promise<void> {
+    const update = this.#updates.then(() => this.#update(text));
+    const handled = update.catch((error: unknown) => {
+      this.#onError(error);
+    });
+    this.#updates = handled;
+    await handled;
+  }
 }
 
 export class SlackBridge {
@@ -63,6 +137,23 @@ export class SlackBridge {
       if (!message) return;
 
       let workingTs: string | undefined;
+      const progress = new SlackProgressReporter(
+        async (text) => {
+          if (!workingTs) return;
+          await client.chat.update({
+            channel: message.channelId,
+            ts: workingTs,
+            text,
+          });
+        },
+        (error) => {
+          this.#logger.warn("slack_progress_update_failed", {
+            agentId: this.#config.agentId,
+            eventId: message.eventId,
+            error,
+          });
+        },
+      );
       try {
         const disposition = await this.#chatService.handleMessage(message, {
           onAccepted: async () => {
@@ -73,16 +164,18 @@ export class SlackBridge {
             });
             workingTs = posted.ts;
           },
+          onPiEvent: (event) => progress.record(event),
         });
-        if (disposition.type !== "completed" || !workingTs) return;
+        if (disposition.type !== "completed" || !workingTs) {
+          await progress.close();
+          return;
+        }
 
+        await progress.complete();
         const outputChunks = chunks(disposition.result.text);
-        const first = outputChunks.shift() ?? "Pi completed without a text response.";
-        await client.chat.update({
-          channel: message.channelId,
-          ts: workingTs,
-          text: first,
-        });
+        if (outputChunks.length === 0) {
+          outputChunks.push("Pi completed without a text response.");
+        }
         for (const text of outputChunks) {
           await client.chat.postMessage({
             channel: message.channelId,
@@ -91,6 +184,7 @@ export class SlackBridge {
           });
         }
       } catch (error) {
+        await progress.close();
         const correlationId = crypto.randomUUID();
         this.#logger.error("slack_message_failed", {
           agentId: this.#config.agentId,

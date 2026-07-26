@@ -9,7 +9,7 @@ The MVP therefore defaults to:
 - direct messages only;
 - a required explicit Slack user allowlist;
 - one Slack app per Unix agent;
-- no raw thinking, tool arguments, tool output, or diffs in Slack;
+- Slack progress may include visible assistant text and tool names, but never raw thinking, tool arguments, tool output, or diffs;
 - no message body logging;
 - no credentials in YAML, SQLite, command-line arguments, or Git.
 
