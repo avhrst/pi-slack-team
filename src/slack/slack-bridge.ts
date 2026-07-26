@@ -4,10 +4,12 @@ import type { SlackCredentials } from "../config/load-config.js";
 import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
+import type { PiUiRequestContext } from "../pi/session-pool.js";
 import type { IncomingSlackMessage } from "../routing/chat-key.js";
 import { downloadSlackFiles } from "./file-download.js";
 import { parseAppMentionEvent, parseMessageEvent } from "./parse-event.js";
 import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
+import { SlackUiBroker } from "./slack-ui.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
 const SLACK_PROGRESS_INTERVAL_MS = 1_000;
@@ -100,6 +102,7 @@ export class SlackBridge {
   readonly #logger: Logger;
   readonly #app: App;
   readonly #botToken: string;
+  readonly #uiBroker = new SlackUiBroker();
   #botUserId: string | undefined;
 
   constructor(
@@ -139,19 +142,32 @@ export class SlackBridge {
   }
 
   async stop(): Promise<void> {
+    this.#uiBroker.cancelAll();
     await this.#app.stop();
+  }
+
+  async handlePiUiRequest(
+    context: PiUiRequestContext,
+  ): Promise<Record<string, unknown>> {
+    return this.#uiBroker.request(context, async (text) => {
+      await this.#app.client.chat.postMessage({
+        channel: context.conversation.channelId,
+        thread_ts: context.conversation.threadTs,
+        text,
+      });
+    });
   }
 
   #registerListeners(): void {
     this.#app.event("message", async ({ body, event, client }) => {
       const message = parseMessageEvent(body, event);
-      if (message) await this.#handleMessage(message, client);
+      if (message) await this.#routeMessage(message, client);
     });
 
     this.#app.event("app_mention", async ({ body, event, client }) => {
       if (!this.#botUserId) return;
       const message = parseAppMentionEvent(body, event, this.#botUserId);
-      if (message) await this.#handleMessage(message, client);
+      if (message) await this.#routeMessage(message, client);
     });
 
     this.#app.event("app_home_opened", async () => {
@@ -168,6 +184,24 @@ export class SlackBridge {
         error,
       });
     });
+  }
+
+  async #routeMessage(
+    message: IncomingSlackMessage,
+    client: App["client"],
+  ): Promise<void> {
+    const uiResult = this.#uiBroker.consume(message);
+    if (!uiResult.handled) {
+      await this.#handleMessage(message, client);
+      return;
+    }
+    if (uiResult.acknowledgement) {
+      await client.chat.postMessage({
+        channel: message.channelId,
+        thread_ts: message.threadTs ?? message.ts,
+        text: uiResult.acknowledgement,
+      });
+    }
   }
 
   async #handleMessage(

@@ -8,6 +8,7 @@ Type=simple
 User=%i
 Group=%i
 Environment=HOME=/home/%i
+Environment=PATH=/home/%i/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=/home/%i
 LoadCredential=slack_bot_token:/etc/pi-slack-team/credentials/%i/slack_bot_token
 LoadCredential=slack_app_token:/etc/pi-slack-team/credentials/%i/slack_app_token

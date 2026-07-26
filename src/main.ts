@@ -31,16 +31,22 @@ async function start(configPath: string): Promise<void> {
   const credentials = loadSlackCredentials(config);
   const logger = createLogger();
   const registry = new Registry(path.join(config.stateDir, "state.sqlite"));
-  const pool = new PiSessionPool(config, registry, logger);
+  const slackReference: { bridge?: SlackBridge } = {};
+  const pool = new PiSessionPool(config, registry, logger, async (context) =>
+    slackReference.bridge
+      ? slackReference.bridge.handlePiUiRequest(context)
+      : { cancelled: true },
+  );
   const chatService = new ChatService(config, registry, pool, logger);
-  const slack = new SlackBridge(config, credentials, chatService, logger);
+  const bridge = new SlackBridge(config, credentials, chatService, logger);
+  slackReference.bridge = bridge;
   let stopping = false;
 
   const shutdown = async (signal: string) => {
     if (stopping) return;
     stopping = true;
     logger.info("runtime_stopping", { agentId: config.agentId, signal });
-    await slack.stop().catch(() => undefined);
+    await bridge.stop().catch(() => undefined);
     await pool.shutdown();
     registry.close();
   };
@@ -56,7 +62,7 @@ async function start(configPath: string): Promise<void> {
     void shutdown("unhandledRejection").finally(() => process.exit(1));
   });
 
-  await slack.start();
+  await bridge.start();
   logger.info("runtime_started", {
     agentId: config.agentId,
     unixUser: config.expectedUnixUser,
