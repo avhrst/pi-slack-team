@@ -82,6 +82,29 @@ describe("agent config", () => {
     });
   });
 
+  it("accepts systemd credential copies with mode 0440", () => {
+    const directory = temporaryDirectory();
+    const botTokenFile = path.join(directory, "slack_bot_token");
+    const appTokenFile = path.join(directory, "slack_app_token");
+    const botToken = ["xoxb", "unit-test-only-abcdefghijklmnop"].join("-");
+    const appToken = ["xapp", "unit-test-only-abcdefghijklmnop"].join("-");
+    fs.writeFileSync(botTokenFile, `${botToken}\n`, { mode: 0o440 });
+    fs.writeFileSync(appTokenFile, `${appToken}\n`, { mode: 0o440 });
+
+    expect(
+      loadSlackCredentials(validConfig(), {
+        CREDENTIALS_DIRECTORY: directory,
+      }),
+    ).toEqual({ botToken, appToken });
+
+    expect(() =>
+      loadSlackCredentials({
+        ...validConfig(),
+        credentials: { botTokenFile, appTokenFile },
+      }),
+    ).toThrow();
+  });
+
   it("rejects placeholder and broadly readable credentials", () => {
     const directory = temporaryDirectory();
     const botTokenFile = path.join(directory, "bot");

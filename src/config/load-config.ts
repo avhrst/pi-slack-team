@@ -18,12 +18,18 @@ export interface SlackCredentials {
 const forbiddenCredentialMarkers =
   /(?:REDACTED|REPLACE|CHANGEME|EXAMPLE|SYNTHETIC|TODO)/i;
 
-function readCredential(file: string, expectedPrefix: string): string {
+function readCredential(
+  file: string,
+  expectedPrefix: string,
+  systemdManaged: boolean,
+): string {
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error(`Credential path is not a regular file: ${file}`);
   }
-  if ((stat.mode & 0o077) !== 0) {
+  const mode = stat.mode & 0o777;
+  const systemdCredentialMode = systemdManaged && mode === 0o440;
+  if ((mode & 0o077) !== 0 && !systemdCredentialMode) {
     throw new Error(`Credential file permissions are too broad: ${file}`);
   }
 
@@ -62,8 +68,9 @@ export function loadSlackCredentials(
   environment: NodeJS.ProcessEnv = process.env,
 ): SlackCredentials {
   const files = resolveCredentialFiles(config, environment);
+  const systemdManaged = config.credentials === undefined;
   return {
-    botToken: readCredential(files.botTokenFile, "xoxb-"),
-    appToken: readCredential(files.appTokenFile, "xapp-"),
+    botToken: readCredential(files.botTokenFile, "xoxb-", systemdManaged),
+    appToken: readCredential(files.appTokenFile, "xapp-", systemdManaged),
   };
 }

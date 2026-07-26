@@ -23,6 +23,19 @@ Recommended production layout:
 7. Enable one systemd unit.
 8. Complete the canary acceptance test before onboarding another agent.
 
+For initial provisioning, an owner-only agent environment file may be imported
+into the root-managed systemd credential directory:
+
+```bash
+node deploy/import-env-credentials.mjs \
+  /home/support-agent/.env \
+  /etc/pi-slack-team/credentials/support-agent
+```
+
+The environment file must have mode `0600` and contain exactly
+`SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN`. The importer never overwrites a
+different existing credential.
+
 ## Failure handling
 
 The worker acknowledges Slack delivery before starting Pi work and records the event ID before prompt submission. A duplicate Slack event is ignored.
