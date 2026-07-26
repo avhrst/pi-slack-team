@@ -8,6 +8,8 @@ slack:
   appId: A0123456789
   allowedUserIds:
     - U0123456789
+  # summary hides tool arguments/output; raw exposes them to the authorized DM.
+  progressMode: summary
 
 pi:
   command: /usr/bin/pi

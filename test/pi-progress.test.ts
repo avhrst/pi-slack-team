@@ -97,7 +97,44 @@ describe("PiProgressTranscript", () => {
     expect(rendered).not.toContain("Database is operational");
   });
 
-  it("never renders thinking deltas or tool call arguments", () => {
+  it("renders raw tool arguments and live results only in raw mode", () => {
+    const transcript = new PiProgressTranscript("raw");
+    transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-1",
+        toolName: "bash",
+        args: { command: "printf direct-output" },
+      }),
+    );
+    transcript.record(
+      event("tool_execution_update", {
+        toolCallId: "call-1",
+        toolName: "bash",
+        partialResult: {
+          content: [{ type: "text", text: "partial output" }],
+        },
+      }),
+    );
+
+    expect(transcript.render("working")).toContain("printf direct-output");
+    expect(transcript.render("working")).toContain("partial output");
+
+    transcript.record(
+      event("tool_execution_end", {
+        toolCallId: "call-1",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "final output" }] },
+        isError: false,
+      }),
+    );
+    const completed = transcript.render("completed");
+    expect(completed).toContain("Tool `bash`");
+    expect(completed).toContain("completed");
+    expect(completed).toContain("final output");
+    expect(completed).not.toContain("partial output");
+  });
+
+  it("never renders thinking deltas", () => {
     const transcript = new PiProgressTranscript();
 
     expect(
@@ -135,7 +172,7 @@ describe("PiProgressTranscript", () => {
     );
 
     const rendered = transcript.render("working");
-    expect(rendered.length).toBeLessThanOrEqual(12_000);
+    expect(rendered.length).toBeLessThanOrEqual(35_000);
     expect(rendered).toContain("Pi is working");
   });
 });

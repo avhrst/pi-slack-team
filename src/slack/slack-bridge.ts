@@ -20,7 +20,7 @@ function chunks(text: string): string[] {
 }
 
 class SlackProgressReporter {
-  readonly #transcript = new PiProgressTranscript();
+  readonly #transcript: PiProgressTranscript;
   readonly #update: (text: string) => Promise<void>;
   readonly #onError: (error: unknown) => void;
   #updates: Promise<void> = Promise.resolve();
@@ -30,9 +30,11 @@ class SlackProgressReporter {
   #closed = false;
 
   constructor(
+    mode: AgentConfig["slack"]["progressMode"],
     update: (text: string) => Promise<void>,
     onError: (error: unknown) => void,
   ) {
+    this.#transcript = new PiProgressTranscript(mode);
     this.#update = update;
     this.#onError = onError;
   }
@@ -138,6 +140,7 @@ export class SlackBridge {
 
       let workingTs: string | undefined;
       const progress = new SlackProgressReporter(
+        this.#config.slack.progressMode,
         async (text) => {
           if (!workingTs) return;
           await client.chat.update({

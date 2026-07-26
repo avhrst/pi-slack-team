@@ -9,7 +9,9 @@ The MVP therefore defaults to:
 - direct messages only;
 - a required explicit Slack user allowlist;
 - one Slack app per Unix agent;
-- Slack progress may include visible assistant text and tool names, but never raw thinking, tool arguments, tool output, or diffs;
+- Slack progress defaults to visible assistant text and tool names only;
+- `progressMode: raw` is an explicit per-agent opt-in that exposes tool arguments and output to the authorized DM;
+- private model thinking is never sent to Slack in either progress mode;
 - no message body logging;
 - no credentials in YAML, SQLite, command-line arguments, or Git.
 

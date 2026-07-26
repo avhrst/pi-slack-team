@@ -44,9 +44,16 @@ afterEach(() => {
 describe("agent config", () => {
   it("applies safe runtime defaults", () => {
     const config = validConfig();
+    expect(config.slack.progressMode).toBe("summary");
     expect(config.pi.command).toBe("/usr/bin/pi");
     expect(config.pi.maxActiveSessions).toBe(1);
     expect(config.pi.idleTimeoutMs).toBe(300_000);
+  });
+
+  it("accepts explicit raw progress output", () => {
+    const input = structuredClone(validConfig());
+    input.slack.progressMode = "raw";
+    expect(agentConfigSchema.parse(input).slack.progressMode).toBe("raw");
   });
 
   it("requires at least one allowed Slack user", () => {

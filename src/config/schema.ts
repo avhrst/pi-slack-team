@@ -21,6 +21,7 @@ export const agentConfigSchema = z
         teamId: slackId("T"),
         appId: slackId("A"),
         allowedUserIds: z.array(slackId("[UW]")).min(1),
+        progressMode: z.enum(["summary", "raw"]).default("summary"),
       })
       .strict(),
     pi: z
