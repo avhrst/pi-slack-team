@@ -116,8 +116,12 @@ describe("PiProgressTranscript", () => {
       }),
     );
 
-    expect(transcript.render("working")).toContain("printf direct-output");
-    expect(transcript.render("working")).toContain("partial output");
+    const working = transcript.render("working");
+    expect(working).toContain("*Command*");
+    expect(working).toContain("$ printf direct-output");
+    expect(working).toContain("partial output");
+    expect(working).not.toContain('"command"');
+    expect(working).not.toContain("{\n");
 
     transcript.record(
       event("tool_execution_end", {
@@ -132,6 +136,22 @@ describe("PiProgressTranscript", () => {
     expect(completed).toContain("completed");
     expect(completed).toContain("final output");
     expect(completed).not.toContain("partial output");
+  });
+
+  it("renders file arguments as compact labeled fields", () => {
+    const transcript = new PiProgressTranscript("raw");
+    transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-1",
+        toolName: "read",
+        args: { path: "/srv/app/config.ts", offset: 20, limit: 50 },
+      }),
+    );
+
+    const rendered = transcript.render("working");
+    expect(rendered).toContain("*Path*\n`/srv/app/config.ts`");
+    expect(rendered).toContain("• *offset:* `20`");
+    expect(rendered).toContain("• *limit:* `50`");
   });
 
   it("never renders thinking deltas", () => {

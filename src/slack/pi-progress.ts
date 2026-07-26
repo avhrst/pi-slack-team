@@ -68,6 +68,59 @@ function resultText(value: unknown): string {
   return jsonText(value);
 }
 
+function inlineCode(value: string): string {
+  return `\`${value.replaceAll("`", "'")}\``;
+}
+
+function argumentValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value.includes("\n") ? codeBlock(value) : inlineCode(value);
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return inlineCode(String(value));
+  }
+  if (Array.isArray(value)) return `${value.length} items`;
+  const record = asRecord(value);
+  if (record) return `${Object.keys(record).length} fields`;
+  return inlineCode(String(value));
+}
+
+function toolArguments(toolName: string, value: unknown): string {
+  const args = asRecord(value);
+  if (!args) return value === undefined ? "" : codeBlock(String(value));
+
+  const entries = Object.entries(args);
+  const primaryKey = ["command", "path", "query", "url"].find(
+    (key) => typeof args[key] === "string",
+  );
+  const sections: string[] = [];
+  if (primaryKey) {
+    const labels: Record<string, string> = {
+      command: "Command",
+      path: "Path",
+      query: "Query",
+      url: "URL",
+    };
+    const primary = args[primaryKey] as string;
+    const rendered =
+      primaryKey === "command"
+        ? codeBlock(`$ ${primary}`)
+        : primaryKey === "path" || primaryKey === "url"
+          ? inlineCode(primary)
+          : primary.includes("\n")
+            ? codeBlock(primary)
+            : primary;
+    sections.push(`*${labels[primaryKey]}*\n${rendered}`);
+  }
+
+  const details = entries
+    .filter(([key]) => key !== primaryKey)
+    .map(([key, item]) => `• *${key}:* ${argumentValue(item)}`);
+  if (details.length > 0) sections.push(details.join("\n"));
+  if (sections.length > 0) return sections.join("\n");
+  return `*Tool:* ${inlineCode(toolName)}`;
+}
+
 function codeBlock(text: string): string {
   const escaped = text.replaceAll("```", "``\u200b`");
   const bounded =
@@ -213,11 +266,11 @@ export class PiProgressTranscript {
         : entry.state === "failed"
           ? ":x: failed"
           : ":white_check_mark: completed";
-    const args = jsonText(entry.args);
+    const args = toolArguments(entry.name, entry.args);
     const output = resultText(entry.result);
     return [
       `*Tool \`${entry.name}\`* — ${state}`,
-      ...(args ? [`*Arguments*\n${codeBlock(args)}`] : []),
+      ...(args ? [args] : []),
       ...(output ? [`*Output*\n${codeBlock(output)}`] : []),
     ].join("\n");
   }
