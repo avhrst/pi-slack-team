@@ -45,6 +45,9 @@ describe("agent config", () => {
   it("applies safe runtime defaults", () => {
     const config = validConfig();
     expect(config.slack.progressMode).toBe("summary");
+    expect(config.slack.fileUploads).toBe(false);
+    expect(config.slack.maxFileBytes).toBe(20 * 1_024 * 1_024);
+    expect(config.slack.maxFilesPerMessage).toBe(5);
     expect(config.pi.command).toBe("/usr/bin/pi");
     expect(config.pi.maxActiveSessions).toBe(1);
     expect(config.pi.idleTimeoutMs).toBe(300_000);

@@ -3,9 +3,9 @@ display_information:
   description: Controlled APEX and SQL deployments to retail locations.
   background_color: "#7a1f5c"
   long_description: >-
-    Pinet Deploy plans and performs authorized Oracle APEX and SQL rollouts to
-    retail locations, including dry runs, execution tracking, and deployment
-    summaries. Each Slack thread uses an isolated persistent Pi session.
+    Pinet Deploy accepts deployment files and performs authorized Oracle APEX
+    and SQL rollouts to retail locations, including dry runs, execution tracking,
+    and deployment summaries. Each Slack thread uses an isolated Pi session.
 
 features:
   bot_user:
@@ -31,6 +31,7 @@ oauth_config:
       - app_mentions:read
       - assistant:write
       - chat:write
+      - files:read
       - im:history
 
 settings:

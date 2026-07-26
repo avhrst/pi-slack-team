@@ -22,6 +22,14 @@ export const agentConfigSchema = z
         appId: slackId("A"),
         allowedUserIds: z.array(slackId("[UW]")).min(1),
         progressMode: z.enum(["summary", "raw"]).default("summary"),
+        fileUploads: z.boolean().default(false),
+        maxFileBytes: z
+          .number()
+          .int()
+          .min(1_024)
+          .max(100 * 1_024 * 1_024)
+          .default(20 * 1_024 * 1_024),
+        maxFilesPerMessage: z.number().int().min(1).max(10).default(5),
       })
       .strict(),
     pi: z

@@ -15,6 +15,7 @@ export type MessageDisposition =
 
 export interface MessageHooks {
   onAccepted?: () => Promise<void>;
+  preparePrompt?: () => Promise<string>;
   onPiEvent?: (event: RpcRecord) => void;
 }
 
@@ -82,10 +83,13 @@ export class ChatService {
     }
 
     await hooks.onAccepted?.();
+    const promptText = hooks.preparePrompt
+      ? await hooks.preparePrompt()
+      : message.text;
     const result = await this.#pool.prompt(
       key,
       message.userId,
-      message.text,
+      promptText,
       hooks.onPiEvent,
     );
     return { type: "completed", result };
@@ -107,8 +111,19 @@ export class ChatService {
     }
     if (!this.#allowedUsers.has(message.userId)) return "unauthorized-user";
     if (message.botId) return "bot-message";
-    if (message.subtype) return "unsupported-subtype";
-    if (!message.text.trim()) return "empty-message";
+    if (message.files.length > this.#config.slack.maxFilesPerMessage) {
+      return "too-many-files";
+    }
+    if (message.files.length > 0 && !this.#config.slack.fileUploads) {
+      return "file-uploads-disabled";
+    }
+    if (
+      message.subtype &&
+      !(message.subtype === "file_share" && message.files.length > 0)
+    ) {
+      return "unsupported-subtype";
+    }
+    if (!message.text.trim() && message.files.length === 0) return "empty-message";
     return undefined;
   }
 }

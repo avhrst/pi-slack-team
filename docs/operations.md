@@ -8,7 +8,7 @@ Recommended production layout:
 /opt/pi-slack-team/current/                 immutable application build
 /etc/pi-slack-team/<agent>.yaml             secret-free agent config
 /etc/pi-slack-team/credentials/<agent>/     root-managed Slack credentials
-/home/<agent>/.local/state/pi-slack-team/   SQLite state
+/home/<agent>/.local/state/pi-slack-team/   SQLite state and optional Slack uploads
 /home/<agent>/.pi/agent/                    Pi config, auth, skills, sessions
 ```
 
@@ -21,7 +21,8 @@ Recommended production layout:
 5. Create the secret-free agent config.
 6. Run `pi-slack-team doctor`.
 7. Enable one systemd unit.
-8. Complete the canary acceptance test before onboarding another agent.
+8. For an upload-enabled agent, add `files:read` to its manifest and set `slack.fileUploads: true`; keep count and byte limits bounded.
+9. Complete the canary acceptance test before onboarding another agent.
 
 For initial provisioning, an owner-only agent environment file may be imported
 into the root-managed systemd credential directory:

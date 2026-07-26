@@ -5,6 +5,7 @@ import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
 import type { IncomingSlackMessage } from "../routing/chat-key.js";
+import { downloadSlackFiles } from "./file-download.js";
 import { parseAppMentionEvent, parseMessageEvent } from "./parse-event.js";
 import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
 
@@ -98,6 +99,7 @@ export class SlackBridge {
   readonly #chatService: ChatService;
   readonly #logger: Logger;
   readonly #app: App;
+  readonly #botToken: string;
   #botUserId: string | undefined;
 
   constructor(
@@ -108,6 +110,7 @@ export class SlackBridge {
   ) {
     this.#config = config;
     this.#chatService = chatService;
+    this.#botToken = credentials.botToken;
     this.#logger = logger;
     this.#app = new App({
       token: credentials.botToken,
@@ -200,6 +203,12 @@ export class SlackBridge {
           });
           workingTs = posted.ts;
         },
+        preparePrompt: () =>
+          downloadSlackFiles(
+            this.#config,
+            message,
+            this.#botToken,
+          ),
         onPiEvent: (event) => progress.record(event),
       });
       if (disposition.type !== "completed" || !workingTs) {

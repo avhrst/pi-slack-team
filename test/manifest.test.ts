@@ -36,6 +36,7 @@ describe("Slack app manifest", () => {
         "app_mentions:read",
         "assistant:write",
         "chat:write",
+        ...(file === "deploy-agent.yaml" ? ["files:read"] : []),
         "im:history",
       ]);
       expect(manifest.settings.event_subscriptions.bot_events).toEqual([

@@ -1,4 +1,7 @@
-import type { IncomingSlackMessage } from "../routing/chat-key.js";
+import type {
+  IncomingSlackFile,
+  IncomingSlackMessage,
+} from "../routing/chat-key.js";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object"
@@ -11,6 +14,39 @@ function requiredString(
   key: string,
 ): string | undefined {
   return typeof record[key] === "string" ? record[key] : undefined;
+}
+
+function parseFiles(value: unknown): IncomingSlackFile[] {
+  if (!Array.isArray(value)) return [];
+  const files: IncomingSlackFile[] = [];
+  for (const item of value) {
+    const file = asRecord(item);
+    if (!file) continue;
+    const id = requiredString(file, "id");
+    const name = requiredString(file, "name");
+    const urlPrivateDownload =
+      requiredString(file, "url_private_download") ??
+      requiredString(file, "url_private");
+    const size = file.size;
+    if (
+      !id ||
+      !name ||
+      !urlPrivateDownload ||
+      typeof size !== "number" ||
+      !Number.isSafeInteger(size) ||
+      size < 0
+    ) {
+      continue;
+    }
+    files.push({
+      id,
+      name,
+      size,
+      urlPrivateDownload,
+      ...(typeof file.mimetype === "string" ? { mimetype: file.mimetype } : {}),
+    });
+  }
+  return files;
 }
 
 function parseEvent(
@@ -63,6 +99,7 @@ function parseEvent(
     userId,
     ts,
     text,
+    files: parseFiles(event.files),
     ...(typeof event.thread_ts === "string"
       ? { threadTs: event.thread_ts }
       : {}),

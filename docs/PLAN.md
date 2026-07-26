@@ -130,7 +130,7 @@ Exit: each bot routes exclusively to its Unix agent and one failed worker does n
 ## Deferred work
 
 - shared-channel and Slack Connect authorization
-- file and image input/output
+- file and image output
 - Git worktree per mutating chat
 - high availability for one Slack app
 - multi-workspace OAuth distribution

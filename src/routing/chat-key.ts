@@ -1,5 +1,13 @@
 import type { ConversationKey } from "../storage/registry.js";
 
+export interface IncomingSlackFile {
+  id: string;
+  name: string;
+  mimetype?: string;
+  size: number;
+  urlPrivateDownload: string;
+}
+
 export interface IncomingSlackMessage {
   kind: "direct-message" | "app-mention";
   eventId: string;
@@ -11,6 +19,7 @@ export interface IncomingSlackMessage {
   ts: string;
   threadTs?: string;
   text: string;
+  files: IncomingSlackFile[];
   subtype?: string;
   botId?: string;
 }

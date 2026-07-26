@@ -19,8 +19,31 @@ describe("Slack event parsing", () => {
         user: "U01",
         ts: "123.456",
         text: "hello",
+        subtype: "file_share",
+        files: [
+          {
+            id: "F01",
+            name: "change.sql",
+            mimetype: "text/plain",
+            size: 9,
+            url_private_download:
+              "https://files.slack.com/files-pri/change.sql",
+          },
+        ],
       }),
-    ).toMatchObject({ kind: "direct-message", text: "hello" });
+    ).toMatchObject({
+      kind: "direct-message",
+      text: "hello",
+      files: [
+        {
+          id: "F01",
+          name: "change.sql",
+          size: 9,
+          urlPrivateDownload:
+            "https://files.slack.com/files-pri/change.sql",
+        },
+      ],
+    });
   });
 
   it("parses channel mentions and removes only the agent mention", () => {

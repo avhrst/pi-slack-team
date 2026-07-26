@@ -13,7 +13,7 @@ import { Registry } from "../src/storage/registry.js";
 
 const temporaryDirectories: string[] = [];
 
-function setup() {
+function setup(fileUploads = false) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-slack-team-chat-"));
   temporaryDirectories.push(directory);
   const config = agentConfigSchema.parse({
@@ -25,6 +25,7 @@ function setup() {
       teamId: "T01",
       appId: "A01",
       allowedUserIds: ["U01", "U02"],
+      fileUploads,
     },
     pi: {
       cwd: directory,
@@ -60,6 +61,7 @@ function message(
     userId: "U01",
     ts: "123.456",
     text: "hello",
+    files: [],
     ...overrides,
   };
 }
@@ -126,6 +128,39 @@ describe("ChatService", () => {
       undefined,
     );
     registry.close();
+  });
+
+  it("accepts files only when enabled and uses the prepared prompt", async () => {
+    const attachment = {
+      id: "F01",
+      name: "change.sql",
+      size: 12,
+      urlPrivateDownload: "https://files.slack.com/files-pri/change.sql",
+    };
+    const disabled = setup();
+    await expect(
+      disabled.service.handleMessage(message({ files: [attachment] })),
+    ).resolves.toMatchObject({
+      type: "ignored",
+      reason: "file-uploads-disabled",
+    });
+    disabled.registry.close();
+
+    const enabled = setup(true);
+    const preparePrompt = vi.fn(async () => "downloaded: /tmp/change.sql");
+    await expect(
+      enabled.service.handleMessage(message({ text: "", files: [attachment] }), {
+        preparePrompt,
+      }),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(preparePrompt).toHaveBeenCalledOnce();
+    expect(enabled.prompt).toHaveBeenCalledWith(
+      expect.anything(),
+      "U01",
+      "downloaded: /tmp/change.sql",
+      undefined,
+    );
+    enabled.registry.close();
   });
 
   it("prevents another allowed user from taking over a thread", async () => {
