@@ -1,0 +1,33 @@
+[Unit]
+Description=Pi Slack worker for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+Environment=HOME=/home/%i
+WorkingDirectory=/home/%i
+LoadCredential=slack_bot_token:/etc/pi-slack-team/credentials/%i/slack_bot_token
+LoadCredential=slack_app_token:/etc/pi-slack-team/credentials/%i/slack_app_token
+ExecStart=/usr/bin/node /opt/pi-slack-team/current/dist/main.js start --config /etc/pi-slack-team/%i.yaml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/%i
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

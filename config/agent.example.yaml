@@ -1,0 +1,27 @@
+version: 1
+agentId: support
+expectedUnixUser: support-agent
+stateDir: /home/support-agent/.local/state/pi-slack-team
+
+slack:
+  teamId: T0123456789
+  appId: A0123456789
+  allowedUserIds:
+    - U0123456789
+
+pi:
+  command: /usr/bin/pi
+  cwd: /home/support-agent
+  agentDir: /home/support-agent/.pi/agent
+  sessionDir: /home/support-agent/.pi/agent/sessions
+  maxActiveSessions: 1
+  idleTimeoutMs: 300000
+
+# Production credentials are loaded from systemd:
+#   $CREDENTIALS_DIRECTORY/slack_bot_token
+#   $CREDENTIALS_DIRECTORY/slack_app_token
+#
+# For local development only, point at owner-readable files:
+# credentials:
+#   botTokenFile: /secure/path/slack_bot_token
+#   appTokenFile: /secure/path/slack_app_token

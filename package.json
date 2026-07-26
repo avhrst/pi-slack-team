@@ -1,0 +1,38 @@
+{
+  "name": "@avhrst/pi-slack-team",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run one Slack app per Linux-isolated Pi agent with one persistent Pi session per Slack chat.",
+  "type": "module",
+  "bin": {
+    "pi-slack-team": "./dist/main.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "eslint . --max-warnings=0 && tsc -p tsconfig.json --noEmit && vitest run",
+    "start": "node dist/main.js start",
+    "doctor": "node dist/main.js doctor"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@slack/bolt": "5.0.0",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "@types/node": "24.13.3",
+    "eslint": "9.39.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  }
+}
