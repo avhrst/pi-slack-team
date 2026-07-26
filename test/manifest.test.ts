@@ -35,8 +35,10 @@ describe("Slack app manifest", () => {
       expect(manifest.oauth_config.scopes.bot).toEqual([
         "app_mentions:read",
         "assistant:write",
+        "channels:history",
         "chat:write",
         ...(file === "deploy-agent.yaml" ? ["files:read"] : []),
+        "groups:history",
         "im:history",
       ]);
       expect(manifest.settings.event_subscriptions.bot_events).toEqual([
@@ -107,7 +109,9 @@ describe("Slack app manifest", () => {
     expect(manifest.oauth_config.scopes.bot).toEqual([
       "app_mentions:read",
       "assistant:write",
+      "channels:history",
       "chat:write",
+      "groups:history",
       "im:history",
     ]);
     expect(manifest.settings.event_subscriptions.bot_events).toEqual([

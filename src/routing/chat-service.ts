@@ -15,7 +15,7 @@ export type MessageDisposition =
 
 export interface MessageHooks {
   onAccepted?: () => Promise<void>;
-  preparePrompt?: () => Promise<string>;
+  preparePrompt?: (context: { isNewConversation: boolean }) => Promise<string>;
   onPiEvent?: (event: RpcRecord) => void;
 }
 
@@ -84,7 +84,7 @@ export class ChatService {
 
     await hooks.onAccepted?.();
     const promptText = hooks.preparePrompt
-      ? await hooks.preparePrompt()
+      ? await hooks.preparePrompt({ isNewConversation: !existing })
       : message.text;
     const result = await this.#pool.prompt(
       key,

@@ -153,7 +153,7 @@ describe("ChatService", () => {
         preparePrompt,
       }),
     ).resolves.toMatchObject({ type: "completed" });
-    expect(preparePrompt).toHaveBeenCalledOnce();
+    expect(preparePrompt).toHaveBeenCalledWith({ isNewConversation: true });
     expect(enabled.prompt).toHaveBeenCalledWith(
       expect.anything(),
       "U01",
@@ -161,6 +161,25 @@ describe("ChatService", () => {
       undefined,
     );
     enabled.registry.close();
+  });
+
+  it("marks a resumed Slack conversation when preparing its prompt", async () => {
+    const { service, registry } = setup();
+    registry.createConversation(
+      {
+        teamId: "T01",
+        appId: "A01",
+        channelId: "D01",
+        threadTs: "123.456",
+      },
+      "U01",
+    );
+    const preparePrompt = vi.fn(async () => "resumed request");
+
+    await service.handleMessage(message(), { preparePrompt });
+
+    expect(preparePrompt).toHaveBeenCalledWith({ isNewConversation: false });
+    registry.close();
   });
 
   it("prevents another allowed user from taking over a thread", async () => {

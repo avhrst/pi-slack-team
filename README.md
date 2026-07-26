@@ -10,6 +10,7 @@ The project is a standalone worker, not an extension attached to one already-run
 - responds to DMs and explicit `@agent` mentions in channels;
 - optionally downloads authorized Slack attachments into private agent storage;
 - maps each Slack DM or channel thread to a persistent Pi JSONL session;
+- bootstraps a new Pi session with bounded prior Slack thread history and a title derived from the root message;
 - starts or resumes a headless Pi RPC subprocess for active chats;
 - stores only non-secret routing state in a per-user SQLite database.
 

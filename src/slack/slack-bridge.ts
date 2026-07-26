@@ -10,6 +10,7 @@ import { downloadSlackFiles } from "./file-download.js";
 import { parseAppMentionEvent, parseMessageEvent } from "./parse-event.js";
 import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
 import { SlackUiBroker } from "./slack-ui.js";
+import { addSlackThreadContext } from "./thread-context.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
 const SLACK_PROGRESS_INTERVAL_MS = 1_000;
@@ -237,12 +238,28 @@ export class SlackBridge {
           });
           workingTs = posted.ts;
         },
-        preparePrompt: () =>
-          downloadSlackFiles(
+        preparePrompt: async ({ isNewConversation }) => {
+          const currentPrompt = await downloadSlackFiles(
             this.#config,
             message,
             this.#botToken,
-          ),
+          );
+          if (!isNewConversation) return currentPrompt;
+          try {
+            return await addSlackThreadContext(
+              message,
+              currentPrompt,
+              (arguments_) => client.conversations.replies(arguments_),
+            );
+          } catch (error) {
+            this.#logger.warn("slack_thread_context_failed", {
+              agentId: this.#config.agentId,
+              eventId: message.eventId,
+              error,
+            });
+            return currentPrompt;
+          }
+        },
         onPiEvent: (event) => progress.record(event),
       });
       if (disposition.type !== "completed" || !workingTs) {

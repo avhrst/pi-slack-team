@@ -13,6 +13,7 @@ The MVP therefore defaults to:
 - `progressMode: raw` is an explicit per-agent opt-in that exposes tool arguments and output in the authorized conversation;
 - private model thinking is never sent to Slack in either progress mode;
 - no message body logging;
+- new sessions receive at most 200 prior Slack thread messages and 50,000 characters, marked as untrusted conversation context;
 - file uploads are disabled by default and bounded by configured count and size limits;
 - accepted files are downloaded only from `files.slack.com` into mode `0600` files under the agent's private state directory;
 - no credentials in YAML, SQLite, command-line arguments, or Git.
