@@ -5,7 +5,7 @@ import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
 import { parseMessageEvent } from "./parse-event.js";
-import { PiProgressTranscript } from "./pi-progress.js";
+import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
 const SLACK_PROGRESS_INTERVAL_MS = 1_000;
@@ -43,13 +43,13 @@ class SlackProgressReporter {
     this.#schedule();
   }
 
-  async complete(): Promise<void> {
+  async complete(finalText: string): Promise<void> {
     this.#closed = true;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#pending = false;
     await this.#updates;
-    await this.#runUpdate(this.#transcript.render("completed"));
+    await this.#runUpdate(this.#transcript.render("completed", finalText));
   }
 
   async close(): Promise<void> {
@@ -171,8 +171,8 @@ export class SlackBridge {
           return;
         }
 
-        await progress.complete();
-        const outputChunks = chunks(disposition.result.text);
+        await progress.complete(disposition.result.text);
+        const outputChunks = chunks(toSlackMrkdwn(disposition.result.text));
         if (outputChunks.length === 0) {
           outputChunks.push("Pi completed without a text response.");
         }

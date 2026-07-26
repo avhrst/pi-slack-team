@@ -1,27 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { PiProgressTranscript } from "../src/slack/pi-progress.js";
+import {
+  PiProgressTranscript,
+  toSlackMrkdwn,
+} from "../src/slack/pi-progress.js";
 
 function event(type: string, fields: Record<string, unknown> = {}) {
   return { type, ...fields };
 }
 
 describe("PiProgressTranscript", () => {
-  it("renders visible assistant text and tool lifecycle summaries", () => {
+  it("compacts parallel tool activity into counts", () => {
     const transcript = new PiProgressTranscript();
 
     transcript.record(
       event("message_update", {
-        assistantMessageEvent: { type: "text_delta", delta: "Checking logs. " },
+        assistantMessageEvent: { type: "text_delta", delta: "Checking logs." },
       }),
     );
     transcript.record(
       event("tool_execution_start", {
+        toolCallId: "call-1",
         toolName: "bash",
         args: { command: "secret command" },
       }),
     );
     transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-2",
+        toolName: "read",
+      }),
+    );
+    transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-3",
+        toolName: "read",
+      }),
+    );
+    transcript.record(
       event("tool_execution_end", {
+        toolCallId: "call-1",
         toolName: "bash",
         result: { content: [{ type: "text", text: "secret output" }] },
         isError: false,
@@ -30,10 +47,54 @@ describe("PiProgressTranscript", () => {
 
     const rendered = transcript.render("working");
     expect(rendered).toContain("Checking logs.");
-    expect(rendered).toContain("Running `bash`");
-    expect(rendered).toContain("`bash` finished");
+    expect(rendered).toContain("`bash` × 1");
+    expect(rendered).toContain("`read` × 2");
+    expect(rendered).toContain("2 running");
+    expect(rendered).not.toContain("Running `bash`");
+    expect(rendered).not.toContain("finished");
     expect(rendered).not.toContain("secret command");
     expect(rendered).not.toContain("secret output");
+  });
+
+  it("removes the duplicated final answer from completed progress", () => {
+    const transcript = new PiProgressTranscript();
+    transcript.record(
+      event("message_update", {
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: "I’ll inspect the database.",
+        },
+      }),
+    );
+    transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-1",
+        toolName: "bash",
+      }),
+    );
+    transcript.record(
+      event("tool_execution_end", {
+        toolCallId: "call-1",
+        toolName: "bash",
+        isError: false,
+      }),
+    );
+    transcript.record(
+      event("message_update", {
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: "**Database is operational.**",
+        },
+      }),
+    );
+
+    const rendered = transcript.render(
+      "completed",
+      "**Database is operational.**",
+    );
+    expect(rendered).toContain("I’ll inspect the database.");
+    expect(rendered).toContain("*Tools:* `bash` × 1");
+    expect(rendered).not.toContain("Database is operational");
   });
 
   it("never renders thinking deltas or tool call arguments", () => {
@@ -76,5 +137,17 @@ describe("PiProgressTranscript", () => {
     const rendered = transcript.render("working");
     expect(rendered.length).toBeLessThanOrEqual(12_000);
     expect(rendered).toContain("Pi is working");
+  });
+});
+
+describe("toSlackMrkdwn", () => {
+  it("converts common Markdown without changing code", () => {
+    expect(
+      toSlackMrkdwn(
+        "## Status\n**Healthy** — [details](https://example.com)\n`**literal**`",
+      ),
+    ).toBe(
+      "*Status*\n*Healthy* — <https://example.com|details>\n`**literal**`",
+    );
   });
 });
