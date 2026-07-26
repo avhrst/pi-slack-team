@@ -6,11 +6,11 @@ Slack is a remote command surface for a coding agent. An authorized Slack user c
 
 The MVP therefore defaults to:
 
-- direct messages only;
-- a required explicit Slack user allowlist;
+- direct messages and explicit app mentions only;
+- a required explicit Slack user allowlist for both DMs and channel mentions;
 - one Slack app per Unix agent;
 - Slack progress defaults to visible assistant text and tool names only;
-- `progressMode: raw` is an explicit per-agent opt-in that exposes tool arguments and output to the authorized DM;
+- `progressMode: raw` is an explicit per-agent opt-in that exposes tool arguments and output in the authorized conversation;
 - private model thinking is never sent to Slack in either progress mode;
 - no message body logging;
 - no credentials in YAML, SQLite, command-line arguments, or Git.

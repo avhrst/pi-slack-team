@@ -4,7 +4,8 @@ import type { SlackCredentials } from "../config/load-config.js";
 import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
-import { parseMessageEvent } from "./parse-event.js";
+import type { IncomingSlackMessage } from "../routing/chat-key.js";
+import { parseAppMentionEvent, parseMessageEvent } from "./parse-event.js";
 import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
@@ -97,6 +98,7 @@ export class SlackBridge {
   readonly #chatService: ChatService;
   readonly #logger: Logger;
   readonly #app: App;
+  #botUserId: string | undefined;
 
   constructor(
     config: AgentConfig,
@@ -121,6 +123,10 @@ export class SlackBridge {
     if (identity.team_id !== this.#config.slack.teamId) {
       throw new Error("Slack bot token belongs to a different workspace");
     }
+    if (!identity.user_id) {
+      throw new Error("Slack auth response did not include a bot user ID");
+    }
+    this.#botUserId = identity.user_id;
     await this.#app.start();
     this.#logger.info("slack_connected", {
       agentId: this.#config.agentId,
@@ -136,75 +142,13 @@ export class SlackBridge {
   #registerListeners(): void {
     this.#app.event("message", async ({ body, event, client }) => {
       const message = parseMessageEvent(body, event);
-      if (!message) return;
+      if (message) await this.#handleMessage(message, client);
+    });
 
-      let workingTs: string | undefined;
-      const progress = new SlackProgressReporter(
-        this.#config.slack.progressMode,
-        async (text) => {
-          if (!workingTs) return;
-          await client.chat.update({
-            channel: message.channelId,
-            ts: workingTs,
-            text,
-          });
-        },
-        (error) => {
-          this.#logger.warn("slack_progress_update_failed", {
-            agentId: this.#config.agentId,
-            eventId: message.eventId,
-            error,
-          });
-        },
-      );
-      try {
-        const disposition = await this.#chatService.handleMessage(message, {
-          onAccepted: async () => {
-            const posted = await client.chat.postMessage({
-              channel: message.channelId,
-              thread_ts: message.threadTs ?? message.ts,
-              text: ":hourglass_flowing_sand: Working…",
-            });
-            workingTs = posted.ts;
-          },
-          onPiEvent: (event) => progress.record(event),
-        });
-        if (disposition.type !== "completed" || !workingTs) {
-          await progress.close();
-          return;
-        }
-
-        await progress.complete(disposition.result.text);
-        const outputChunks = chunks(toSlackMrkdwn(disposition.result.text));
-        if (outputChunks.length === 0) {
-          outputChunks.push("Pi completed without a text response.");
-        }
-        for (const text of outputChunks) {
-          await client.chat.postMessage({
-            channel: message.channelId,
-            thread_ts: message.threadTs ?? message.ts,
-            text,
-          });
-        }
-      } catch (error) {
-        await progress.close();
-        const correlationId = crypto.randomUUID();
-        this.#logger.error("slack_message_failed", {
-          agentId: this.#config.agentId,
-          eventId: message.eventId,
-          correlationId,
-          error,
-        });
-        if (workingTs) {
-          await client.chat
-            .update({
-              channel: message.channelId,
-              ts: workingTs,
-              text: `Pi could not complete this request. Reference: ${correlationId}`,
-            })
-            .catch(() => undefined);
-        }
-      }
+    this.#app.event("app_mention", async ({ body, event, client }) => {
+      if (!this.#botUserId) return;
+      const message = parseAppMentionEvent(body, event, this.#botUserId);
+      if (message) await this.#handleMessage(message, client);
     });
 
     this.#app.event("app_home_opened", async () => {
@@ -212,7 +156,7 @@ export class SlackBridge {
     });
 
     this.#app.event("assistant_thread_started", async () => {
-      // Session creation remains lazy until the first authorized message.im.
+      // Session creation remains lazy until the first authorized DM or mention.
     });
 
     this.#app.error(async (error) => {
@@ -221,5 +165,78 @@ export class SlackBridge {
         error,
       });
     });
+  }
+
+  async #handleMessage(
+    message: IncomingSlackMessage,
+    client: App["client"],
+  ): Promise<void> {
+    let workingTs: string | undefined;
+    const progress = new SlackProgressReporter(
+      this.#config.slack.progressMode,
+      async (text) => {
+        if (!workingTs) return;
+        await client.chat.update({
+          channel: message.channelId,
+          ts: workingTs,
+          text,
+        });
+      },
+      (error) => {
+        this.#logger.warn("slack_progress_update_failed", {
+          agentId: this.#config.agentId,
+          eventId: message.eventId,
+          error,
+        });
+      },
+    );
+    try {
+      const disposition = await this.#chatService.handleMessage(message, {
+        onAccepted: async () => {
+          const posted = await client.chat.postMessage({
+            channel: message.channelId,
+            thread_ts: message.threadTs ?? message.ts,
+            text: ":hourglass_flowing_sand: Working…",
+          });
+          workingTs = posted.ts;
+        },
+        onPiEvent: (event) => progress.record(event),
+      });
+      if (disposition.type !== "completed" || !workingTs) {
+        await progress.close();
+        return;
+      }
+
+      await progress.complete(disposition.result.text);
+      const outputChunks = chunks(toSlackMrkdwn(disposition.result.text));
+      if (outputChunks.length === 0) {
+        outputChunks.push("Pi completed without a text response.");
+      }
+      for (const text of outputChunks) {
+        await client.chat.postMessage({
+          channel: message.channelId,
+          thread_ts: message.threadTs ?? message.ts,
+          text,
+        });
+      }
+    } catch (error) {
+      await progress.close();
+      const correlationId = crypto.randomUUID();
+      this.#logger.error("slack_message_failed", {
+        agentId: this.#config.agentId,
+        eventId: message.eventId,
+        correlationId,
+        error,
+      });
+      if (workingTs) {
+        await client.chat
+          .update({
+            channel: message.channelId,
+            ts: workingTs,
+            text: `Pi could not complete this request. Reference: ${correlationId}`,
+          })
+          .catch(() => undefined);
+      }
+    }
   }
 }

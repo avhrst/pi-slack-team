@@ -1,6 +1,7 @@
 import type { ConversationKey } from "../storage/registry.js";
 
 export interface IncomingSlackMessage {
+  kind: "direct-message" | "app-mention";
   eventId: string;
   teamId: string;
   appId: string;

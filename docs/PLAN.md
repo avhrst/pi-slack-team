@@ -32,8 +32,8 @@ There is no root message broker and no shared Slack app token. Each worker inher
 
 1. `app_home_opened` is presence only and never creates a Pi session.
 2. `assistant_thread_started` may register Slack metadata but session allocation remains lazy.
-3. The first authorized `message.im` in a new root/thread creates a persistent Pi session.
-4. Replies in that thread resume the same session.
+3. The first authorized `message.im` or `app_mention` in a new root/thread creates a persistent Pi session.
+4. Later authorized events in that thread resume the same session; channel turns must explicitly mention the agent.
 5. A different Slack thread creates a different Pi session.
 6. Mapping survives worker and Pi subprocess restarts.
 7. Active same-thread inputs are queued deterministically; explicit steering is a separate action.
@@ -57,9 +57,9 @@ Exit: a clean `pnpm check` and `pnpm build`.
 - exact workspace/app/user authorization
 - immediate event acknowledgement
 - duplicate-event suppression
-- DM-only MVP
+- DMs and explicit channel mentions
 
-Exit: a canary bot accepts an allowed DM and rejects all other users and event types.
+Exit: a canary bot accepts an allowed DM or channel mention and rejects all other users and event types.
 
 ### 3. Pi RPC runtime
 
@@ -129,7 +129,7 @@ Exit: each bot routes exclusively to its Unix agent and one failed worker does n
 
 ## Deferred work
 
-- channel mentions and shared-channel authorization
+- shared-channel and Slack Connect authorization
 - file and image input/output
 - Git worktree per mutating chat
 - high availability for one Slack app

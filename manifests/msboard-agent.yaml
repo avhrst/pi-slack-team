@@ -1,0 +1,46 @@
+display_information:
+  name: Pinet MSBoard
+  description: Oracle APEX application 104 development and diagnostics.
+  background_color: "#126e67"
+  long_description: >-
+    Pinet MSBoard develops, validates, tests, and diagnoses Oracle APEX
+    application 104 using its dedicated APEXlang workflow. Each Slack thread
+    uses an isolated persistent Pi session.
+
+features:
+  bot_user:
+    display_name: Pinet MSBoard
+    always_online: true
+  agent_view:
+    agent_description: Dedicated Oracle APEX and APEXlang agent for MSBoard application 104.
+    suggested_prompts:
+      - title: Change application 104
+        message: Implement this change in MSBoard application 104.
+      - title: Diagnose MSBoard
+        message: Diagnose this MSBoard page, ORDS, or performance issue.
+      - title: Validate APEX
+        message: Export and validate the current application 104 with APEXlang.
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - assistant:write
+      - chat:write
+      - im:history
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

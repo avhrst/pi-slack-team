@@ -7,7 +7,8 @@ The project is a standalone worker, not an extension attached to one already-run
 - runs as the target agent's Unix account;
 - owns exactly one Slack Socket Mode app connection;
 - accepts only configured Slack workspace and user IDs;
-- maps a Slack DM thread to a persistent Pi JSONL session;
+- responds to DMs and explicit `@agent` mentions in channels;
+- maps each Slack DM or channel thread to a persistent Pi JSONL session;
 - starts or resumes a headless Pi RPC subprocess for active chats;
 - stores only non-secret routing state in a per-user SQLite database.
 

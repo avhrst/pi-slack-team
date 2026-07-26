@@ -1,0 +1,46 @@
+display_information:
+  name: Pinet Deploy
+  description: Controlled APEX and SQL deployments to retail locations.
+  background_color: "#7a1f5c"
+  long_description: >-
+    Pinet Deploy plans and performs authorized Oracle APEX and SQL rollouts to
+    retail locations, including dry runs, execution tracking, and deployment
+    summaries. Each Slack thread uses an isolated persistent Pi session.
+
+features:
+  bot_user:
+    display_name: Pinet Deploy
+    always_online: true
+  agent_view:
+    agent_description: Controlled APEX and SQL deployment agent for retail locations.
+    suggested_prompts:
+      - title: Plan a deployment
+        message: Prepare a dry-run plan for deploying this change to the selected stores.
+      - title: Deploy an APEX app
+        message: Deploy the specified APEX application to the authorized retail locations.
+      - title: Run a SQL rollout
+        message: Validate and deploy this SQL file to the selected retail locations.
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - assistant:write
+      - chat:write
+      - im:history
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

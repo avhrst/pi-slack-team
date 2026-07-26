@@ -51,6 +51,7 @@ function message(
   overrides: Partial<IncomingSlackMessage> = {},
 ): IncomingSlackMessage {
   return {
+    kind: "direct-message",
     eventId: "Ev01",
     teamId: "T01",
     appId: "A01",
@@ -82,7 +83,7 @@ describe("ChatService", () => {
     registry.close();
   });
 
-  it("fails closed for wrong users, apps, and non-DM channels", async () => {
+  it("fails closed for wrong users, apps, and unmentioned channels", async () => {
     const { service, prompt, registry } = setup();
     await expect(
       service.handleMessage(message({ userId: "U99" })),
@@ -98,8 +99,32 @@ describe("ChatService", () => {
           channelType: "channel",
         }),
       ),
-    ).resolves.toMatchObject({ type: "ignored", reason: "dm-only" });
+    ).resolves.toMatchObject({
+      type: "ignored",
+      reason: "unsupported-conversation",
+    });
     expect(prompt).not.toHaveBeenCalled();
+    registry.close();
+  });
+
+  it("accepts an authorized app mention in a channel", async () => {
+    const { service, prompt, registry } = setup();
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "app-mention",
+          channelId: "C01",
+          channelType: "channel",
+          text: "help in this channel",
+        }),
+      ),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "U01",
+      "help in this channel",
+      undefined,
+    );
     registry.close();
   });
 

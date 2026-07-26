@@ -94,8 +94,16 @@ export class ChatService {
   #rejectionReason(message: IncomingSlackMessage): string | undefined {
     if (message.teamId !== this.#config.slack.teamId) return "wrong-team";
     if (message.appId !== this.#config.slack.appId) return "wrong-app";
-    if (message.channelType !== "im" || !message.channelId.startsWith("D")) {
-      return "dm-only";
+    const validDirectMessage =
+      message.kind === "direct-message" &&
+      message.channelType === "im" &&
+      message.channelId.startsWith("D");
+    const validChannelMention =
+      message.kind === "app-mention" &&
+      ["channel", "group"].includes(message.channelType) &&
+      ["C", "G"].some((prefix) => message.channelId.startsWith(prefix));
+    if (!validDirectMessage && !validChannelMention) {
+      return "unsupported-conversation";
     }
     if (!this.#allowedUsers.has(message.userId)) return "unauthorized-user";
     if (message.botId) return "bot-message";
