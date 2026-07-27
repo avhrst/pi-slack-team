@@ -1,11 +1,21 @@
 import { App, LogLevel } from "@slack/bolt";
 import type { AgentConfig } from "../config/schema.js";
 import type { SlackCredentials } from "../config/load-config.js";
+import type { InterAgentGateway } from "../inter-agent/gateway.js";
+import {
+  delegationPrompt,
+  delegationResponseMessages,
+  incomingDelegationRequest,
+} from "../inter-agent/protocol.js";
 import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
 import type { PiUiRequestContext } from "../pi/session-pool.js";
-import type { IncomingSlackMessage } from "../routing/chat-key.js";
+import {
+  conversationKey,
+  serializeConversationKey,
+  type IncomingSlackMessage,
+} from "../routing/chat-key.js";
 import { downloadSlackFiles } from "./file-download.js";
 import {
   parseAppMentionEvent,
@@ -109,20 +119,24 @@ class SlackProgressReporter {
 export class SlackBridge {
   readonly #config: AgentConfig;
   readonly #chatService: ChatService;
+  readonly #interAgent: InterAgentGateway;
   readonly #logger: Logger;
   readonly #app: App;
   readonly #botToken: string;
   readonly #uiBroker = new SlackUiBroker();
+  readonly #delegatedTurns = new Map<string, number>();
   #botUserId: string | undefined;
 
   constructor(
     config: AgentConfig,
     credentials: SlackCredentials,
     chatService: ChatService,
+    interAgent: InterAgentGateway,
     logger: Logger,
   ) {
     this.#config = config;
     this.#chatService = chatService;
+    this.#interAgent = interAgent;
     this.#botToken = credentials.botToken;
     this.#logger = logger;
     this.#app = new App({
@@ -130,6 +144,13 @@ export class SlackBridge {
       appToken: credentials.appToken,
       socketMode: true,
       logLevel: LogLevel.ERROR,
+    });
+    this.#interAgent.setSlackSender(async (message) => {
+      await this.#app.client.chat.postMessage({
+        channel: message.channelId,
+        thread_ts: message.threadTs,
+        text: message.text,
+      });
     });
     this.#registerListeners();
   }
@@ -160,6 +181,13 @@ export class SlackBridge {
   async handlePiUiRequest(
     context: PiUiRequestContext,
   ): Promise<Record<string, unknown>> {
+    const key = serializeConversationKey(context.conversation);
+    if (
+      this.#delegatedTurns.has(key) ||
+      this.#interAgent.isTrustedManagerUser(context.conversation.ownerUserId)
+    ) {
+      return { cancelled: true };
+    }
     return this.#uiBroker.request(context, async (text) => {
       await this.#app.client.chat.postMessage({
         channel: context.conversation.channelId,
@@ -211,6 +239,13 @@ export class SlackBridge {
     message: IncomingSlackMessage,
     client: App["client"],
   ): Promise<void> {
+    const interAgentResponse = this.#interAgent.parseResponse(message);
+    if (interAgentResponse) {
+      if (this.#chatService.claimEvent(message.eventId)) {
+        this.#interAgent.acceptResponse(interAgentResponse);
+      }
+      return;
+    }
     const uiResult = this.#uiBroker.consume(
       message,
       (eventId) => this.#chatService.claimEvent(eventId),
@@ -234,6 +269,16 @@ export class SlackBridge {
   ): Promise<void> {
     const managerObservation =
       this.#config.role === "manager" && message.kind === "channel-message";
+    const delegatedRequest = incomingDelegationRequest(this.#config, message);
+    const delegatedKey = delegatedRequest
+      ? serializeConversationKey(conversationKey(message))
+      : undefined;
+    if (delegatedKey) {
+      this.#delegatedTurns.set(
+        delegatedKey,
+        (this.#delegatedTurns.get(delegatedKey) ?? 0) + 1,
+      );
+    }
     let workingTs: string | undefined;
     const progress = new SlackProgressReporter(
       this.#config.slack.progressMode,
@@ -265,8 +310,9 @@ export class SlackBridge {
           workingTs = posted.ts;
         },
         preparePrompt: async ({ isNewConversation }) => {
-          const currentPrompt =
-            managerObservation && !this.#config.slack.fileUploads
+          const currentPrompt = delegatedRequest
+            ? delegationPrompt(delegatedRequest)
+            : managerObservation && !this.#config.slack.fileUploads
               ? managerObservationContent(message)
               : await downloadSlackFiles(
                   this.#config,
@@ -314,7 +360,10 @@ export class SlackBridge {
 
       if (workingTs) await progress.complete(responseText);
       else await progress.close();
-      const outputChunks = chunks(toSlackMrkdwn(responseText));
+      const renderedResponse = toSlackMrkdwn(responseText);
+      const outputChunks = delegatedRequest
+        ? delegationResponseMessages(delegatedRequest, renderedResponse)
+        : chunks(renderedResponse);
       if (outputChunks.length === 0) {
         outputChunks.push("Pi completed without a text response.");
       }
@@ -342,6 +391,29 @@ export class SlackBridge {
             text: `Pi could not complete this request. Reference: ${correlationId}`,
           })
           .catch(() => undefined);
+      }
+      if (delegatedRequest) {
+        const failure = `Worker could not complete the delegated request. Reference: ${correlationId}`;
+        for (const text of delegationResponseMessages(
+          delegatedRequest,
+          failure,
+          37_000,
+          "error",
+        )) {
+          await client.chat
+            .postMessage({
+              channel: message.channelId,
+              thread_ts: message.threadTs ?? message.ts,
+              text,
+            })
+            .catch(() => undefined);
+        }
+      }
+    } finally {
+      if (delegatedKey) {
+        const remaining = (this.#delegatedTurns.get(delegatedKey) ?? 1) - 1;
+        if (remaining > 0) this.#delegatedTurns.set(delegatedKey, remaining);
+        else this.#delegatedTurns.delete(delegatedKey);
       }
     }
   }

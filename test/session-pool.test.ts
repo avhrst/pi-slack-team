@@ -185,6 +185,53 @@ describe("PiSessionPool", () => {
     registry.close();
   });
 
+  it("loads the manager delegation extension with bound conversation context", async () => {
+    const { clients, config, registry, factory, logger } = setup();
+    const managerConfig = agentConfigSchema.parse({
+      ...config,
+      role: "manager",
+      interAgent: {
+        peers: [
+          {
+            agentId: "specialist",
+            role: "worker",
+            appId: "A02",
+            botUserId: "UWORKER",
+          },
+        ],
+      },
+    });
+    const managerPool = new PiSessionPool(
+      managerConfig,
+      registry,
+      logger,
+      async () => ({ cancelled: true }),
+      factory,
+    );
+    const channelKey = { ...key, channelId: "C01" };
+
+    await managerPool.prompt(channelKey, "U01", "delegate this");
+
+    expect(clients[0]?.options.extensionPaths?.[0]).toMatch(
+      /inter-agent\/delegate-extension\.js$/u,
+    );
+    expect(clients[0]?.options.environment).toMatchObject({
+      PI_SLACK_TEAM_INTER_AGENT_WORKERS: '["specialist"]',
+      PI_SLACK_TEAM_INTER_AGENT_MAX_TASK_CHARS: "30000",
+    });
+    const encoded = clients[0]?.options.environment?.[
+      "PI_SLACK_TEAM_INTER_AGENT_CONVERSATION"
+    ];
+    expect(
+      JSON.parse(Buffer.from(encoded ?? "", "base64url").toString("utf8")),
+    ).toEqual(channelKey);
+
+    await managerPool.prompt(key, "U01", "DM cannot host another app");
+    expect(clients[1]?.options.extensionPaths).toBeUndefined();
+    await managerPool.shutdown();
+    registry.close();
+  });
+
   it("cancels a pending UI request when its RPC client exits", async () => {
     const { config, registry, logger } = setup();
     const clients: DialogExitClient[] = [];

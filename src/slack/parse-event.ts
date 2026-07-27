@@ -73,6 +73,10 @@ function parseEvent(
           ? "group"
           : undefined);
   const userId = requiredString(event, "user");
+  const botProfile = asRecord(event.bot_profile);
+  const senderAppId =
+    requiredString(event, "app_id") ??
+    (botProfile ? requiredString(botProfile, "app_id") : undefined);
   const ts = requiredString(event, "ts");
   const rawText = requiredString(event, "text");
   const text = rawText === undefined ? undefined : textTransform(rawText);
@@ -105,6 +109,7 @@ function parseEvent(
       : {}),
     ...(typeof event.subtype === "string" ? { subtype: event.subtype } : {}),
     ...(typeof event.bot_id === "string" ? { botId: event.bot_id } : {}),
+    ...(senderAppId ? { senderAppId } : {}),
   };
 }
 
@@ -146,6 +151,10 @@ export function parseAppMentionEvent(
   const mention = `<@${botUserId}>`;
   return parseEvent(bodyValue, eventValue, "app-mention", (text) => {
     if (!text.includes(mention)) return undefined;
-    return text.replaceAll(mention, "").trim();
+    const firstMentionRemoved = text.replace(mention, "");
+    const leadingTrimmed = firstMentionRemoved.trimStart();
+    return leadingTrimmed.startsWith("[pi-slack-team:v1:")
+      ? leadingTrimmed
+      : text.replaceAll(mention, "").trim();
   });
 }

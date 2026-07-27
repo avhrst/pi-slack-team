@@ -64,6 +64,55 @@ describe("agent config", () => {
     expect(config.slack.progressMode).toBe("raw");
   });
 
+  it("validates role-specific inter-agent peers and applies safe limits", () => {
+    const input = structuredClone(validConfig());
+    input.role = "manager";
+    const config = agentConfigSchema.parse({
+      ...input,
+      interAgent: {
+        peers: [
+          {
+            agentId: "specialist",
+            role: "worker",
+            appId: "A0000000001",
+            botUserId: "U0000000001",
+          },
+        ],
+      },
+    });
+
+    expect(config.interAgent).toMatchObject({
+      requestTimeoutMs: 900_000,
+      maxTaskChars: 30_000,
+      maxResponseChars: 50_000,
+    });
+  });
+
+  it("rejects same-role, self-app, and duplicate inter-agent peers", () => {
+    const input = structuredClone(validConfig());
+    expect(() =>
+      agentConfigSchema.parse({
+        ...input,
+        interAgent: {
+          peers: [
+            {
+              agentId: "other-worker",
+              role: "worker",
+              appId: input.slack.appId,
+              botUserId: "U0000000001",
+            },
+            {
+              agentId: "other-worker",
+              role: "worker",
+              appId: "A0000000001",
+              botUserId: "U0000000001",
+            },
+          ],
+        },
+      }),
+    ).toThrow();
+  });
+
   it("provides valid public examples for both roles", () => {
     const worker = loadConfig(path.resolve("config/worker.example.yaml"));
     const manager = loadConfig(path.resolve("config/manager.example.yaml"));
@@ -84,6 +133,15 @@ describe("agent config", () => {
       allowedUserIds: ["U0000000000"],
     });
     expect(manager.slack).toMatchObject(worker.slack);
+  });
+
+  it("parses every public runtime example", () => {
+    const examples = fs
+      .readdirSync("config")
+      .filter((file) => file.endsWith(".example.yaml"));
+    for (const example of examples) {
+      expect(() => loadConfig(path.resolve("config", example)), example).not.toThrow();
+    }
   });
 
   it("requires at least one allowed Slack user", () => {

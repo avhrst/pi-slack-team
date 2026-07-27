@@ -16,6 +16,18 @@ slack:
   maxFileBytes: 20971520
   maxFilesPerMessage: 5
 
+# Optional, fail-closed acceptance of delegated requests from this manager.
+# appId and botUserId must both match the bot-authored app_mention event.
+interAgent:
+  peers:
+    - agentId: example-manager
+      role: manager
+      appId: A00000000000
+      botUserId: U00000000000
+  requestTimeoutMs: 900000
+  maxTaskChars: 30000
+  maxResponseChars: 50000
+
 pi:
   command: /usr/bin/pi
   cwd: /home/pi-worker

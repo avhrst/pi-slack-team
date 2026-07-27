@@ -14,7 +14,26 @@ The Slack/Pi boundary is hidden behind internal adapters so a future SDK-backed 
 
 `role: manager` also evaluates ordinary human messages delivered from public and private channels that the Slack app has joined. Ambient messages are wrapped as untrusted observations with sender/channel metadata. The manager may use its configured tools (for example Jira) and publish a threaded response when intervention is useful, or return the internal silent marker to produce no Slack output. Ambient turns never post a working/progress message. Explicit DMs and mentions retain normal worker behavior.
 
-Manager delivery requires the Slack app event subscriptions `message.channels` and `message.groups`. Runtime authorization still requires `allowedUserIds`, and bot messages are ignored to prevent agent loops.
+Manager delivery requires the Slack app event subscriptions `message.channels` and `message.groups`. Runtime authorization still requires `allowedUserIds`. Ordinary bot messages are ignored to prevent agent loops; the only exception is a versioned correlated inter-agent envelope whose sender app ID, bot user ID, role, and direction match `interAgent.peers`.
+
+## Inter-agent delegation
+
+A manager with configured worker peers loads a runtime-owned Pi extension into each RPC process. The extension registers `delegate_to_worker` and connects to a mode-`0600` Unix socket below the manager's private `stateDir`. The child provides its immutable Slack conversation key; the parent verifies that the conversation exists and is a public/private channel thread before posting anything.
+
+```text
+manager Pi turn
+    │ delegate_to_worker(workerId, task)
+    ▼
+private same-UID Unix socket
+    ▼
+manager runtime ── explicit correlated @mention ──► worker Slack app/runtime
+    ▲                                                    │
+    └──── correlated response chunks in same thread ◄────┘
+```
+
+Slack remains the cross-Unix-account transport, so no shared root broker, agent credential, filesystem, or session store is introduced. Both apps must be members of the channel. Requests and responses authenticate the Slack event identity against reciprocal peer configuration. The manager consumes a matching worker response into the pending tool call and does not prompt its LLM again for that bot event. This synchronous correlation boundary prevents unbounded bot-to-bot reply loops.
+
+A worker runs delegated work under its existing isolated account and per-thread session. Interactive dialogs are cancelled for delegated turns; approval cannot be transferred to a bot. In-flight manager waits are memory-only and fail on timeout, cancellation, or runtime shutdown. Slack still retains the visible request/result, while the worker session remains persistent.
 
 ## Identity boundary
 
@@ -22,6 +41,7 @@ One tuple is immutable for the life of a worker:
 
 ```text
 agentId -> Unix UID -> Slack workspace -> Slack app -> bot identity
+                              └-> explicit opposite-role peer allowlist (optional)
 ```
 
 The process refuses to start when the configured Unix username differs from its effective username. It also verifies incoming workspace and app IDs and uses a required Slack user allowlist.
@@ -43,12 +63,13 @@ When that first qualifying message creates a Pi session, the worker scans Slack 
 - One long-lived Slack runtime worker per agent, independent of the configured agent role.
 - Zero or more active Pi RPC subprocesses inside the worker's systemd cgroup.
 - One Pi process per active Slack conversation.
+- One private local delegation gateway only for a manager with worker peers.
 - Persistent Pi session file survives process hibernation.
 - Per-conversation queue serializes input.
 - A global semaphore limits simultaneous active turns.
 
 ## Storage
 
-SQLite contains routing state, event IDs, and pending interaction metadata. It never contains Slack or model credentials.
+SQLite contains routing state, event IDs, and pending interaction metadata. It never contains Slack or model credentials. Inter-agent response correlation is intentionally in memory; the local Unix socket carries no credential and is accessible only to the manager UID.
 
 Pi remains the source of truth for conversation history. SQLite stores only the path and ID required to resume that Pi session.

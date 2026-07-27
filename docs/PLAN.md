@@ -2,7 +2,7 @@
 
 ## Goal
 
-Give every Linux-isolated Pi agent its own Slack app. Each agent is configured as a `worker` or `manager`. Each new qualifying Slack chat creates a distinct persistent Pi session; subsequent messages in the same Slack thread resume that session.
+Give every Linux-isolated Pi agent its own Slack app. Each agent is configured as a `worker` or `manager`. Each new qualifying Slack chat creates a distinct persistent Pi session; subsequent messages in the same Slack thread resume that session. Optionally let a manager delegate to explicitly configured workers and receive their correlated results without accepting ordinary bot messages or sharing Unix credentials.
 
 ## Architecture
 
@@ -35,10 +35,11 @@ There is no root message broker and no shared Slack app token. Each worker inher
 3. The first authorized `message.im` or `app_mention` in a new root/thread creates a persistent Pi session.
 4. For `role: worker`, later channel turns must explicitly mention the agent.
 5. For `role: manager`, authorized human `message.channels` and `message.groups` events also resume or create the thread session; the agent decides whether to act/respond or remain silent.
-6. A different Slack thread creates a different Pi session.
-7. Mapping survives runtime worker and Pi subprocess restarts.
-8. Active same-thread inputs are queued deterministically; explicit steering is a separate action.
-9. Idle Pi processes may stop while their session files remain resumable.
+6. A configured manager may call `delegate_to_worker` only from a shared channel thread; the worker response resolves that pending tool call without a second manager Pi turn.
+7. A different Slack thread creates a different Pi session.
+8. Mapping survives runtime worker and Pi subprocess restarts; an in-flight delegation wait intentionally does not.
+9. Active same-thread inputs are queued deterministically; explicit steering is a separate action.
+10. Idle Pi processes may stop while their session files remain resumable.
 
 ## Delivery sequence
 
@@ -60,6 +61,7 @@ Exit: a clean `pnpm check` and `pnpm build`.
 - duplicate-event suppression
 - DMs and explicit channel mentions for workers
 - opt-in ambient public/private channel events for managers, with silent no-op decisions
+- reciprocal app/bot-user peer allowlists and correlated manager-to-worker envelopes
 
 Exit: a canary worker accepts an allowed DM or channel mention, a canary manager evaluates an allowed ambient channel message without mandatory output, and both reject unauthorized users.
 
@@ -100,6 +102,7 @@ Exit: streaming does not flood Slack and UI responses cannot cross users or chat
 - fixed workspace, app, Unix identity, cwd, and Pi directories
 - systemd credentials instead of token environment values
 - token/content redaction
+- ordinary bot rejection with exact peer, direction, version, and correlation checks for delegation
 - no thinking or raw tool output in Slack by default
 - single-use expiring interactive actions
 - per-cwd mutation serialization
@@ -128,6 +131,8 @@ Exit: each bot routes exclusively to its Unix agent and one failed worker does n
 8. Interactive requests return only to the originating Pi session.
 9. Two mutating chats cannot operate on the same cwd concurrently.
 10. A single worker failure leaves all other agent bots healthy.
+11. A configured manager can delegate one task to a worker in the same channel thread and receive the result in its current Pi turn.
+12. Unconfigured bots, wrong app/bot-user pairs, malformed/orphaned envelopes, DM delegation, and bot approval attempts fail closed.
 
 ## Deferred work
 

@@ -10,7 +10,8 @@ Run one Slack app per Linux-isolated [Pi coding agent](https://github.com/earend
 
 - One immutable identity chain per runtime: Slack app → Unix account → Pi agent.
 - Two roles: on-demand `worker` and proactive `manager`.
-- Exact Slack workspace, app, and human-user authorization.
+- Opt-in, correlated manager-to-worker delegation in a shared Slack thread.
+- Exact Slack workspace, app, human-user, and inter-agent peer authorization.
 - One persistent Pi JSONL session per Slack DM/thread.
 - Bounded untrusted Slack thread history for new sessions.
 - Event deduplication and per-thread serial execution.
@@ -35,7 +36,8 @@ role: worker # or manager
 | Authorized direct messages | Yes | Yes |
 | Explicit channel `@mention` | Yes | Yes |
 | Ordinary authorized human messages in joined channels | No | Yes |
-| Bot-authored or unauthorized messages | Ignored | Ignored |
+| Ordinary bot-authored or unauthorized messages | Ignored | Ignored |
+| Authenticated inter-agent request/response envelope | Accepted from configured managers | Accepted from configured workers |
 | Ambient turn may remain completely silent | N/A | Yes |
 
 ### Worker
@@ -56,6 +58,8 @@ Ambient manager turns never publish `Working…` or tool progress. This avoids f
 
 The runtime itself is not Jira-specific. A manager can create Jira work only when its Pi account has Jira tools and its agent instructions authorize that behavior. Good manager instructions should require duplicate search, a clear project/scope, and no sensitive data in tickets.
 
+When `interAgent.peers` is configured on both sides, manager Pi sessions for shared channel threads also receive a `delegate_to_worker` tool. It posts a correlated explicit mention in the originating shared Slack thread, waits for the configured worker's response, and returns that response to the manager's current turn. Ordinary bot messages remain rejected; both the sender app ID and bot user ID must match the peer allowlist.
+
 Use [the public manager manifest](manifests/manager-agent.example.yaml) and [the manager config example](config/manager.example.yaml). See [Agent roles](docs/roles.md) for the complete contract.
 
 ## Architecture
@@ -72,6 +76,7 @@ pi-slack-team runtime (one Unix account)
         ├── authorization + event deduplication
         ├── Slack thread → Pi session registry (SQLite)
         ├── per-thread queue + global semaphore
+        ├── manager tool ↔ private Unix IPC ↔ correlated Slack peer envelope
         │
         ├── active chat A → Pi RPC → session A.jsonl
         └── active chat B → Pi RPC → session B.jsonl
@@ -208,7 +213,8 @@ The schema is strict: unknown keys and invalid IDs fail startup.
 | `agentId` | Yes | — | Stable lowercase runtime identifier |
 | `role` | No | `worker` | `worker` or `manager` event policy |
 | `expectedUnixUser` | Yes | — | Effective Unix user required at startup |
-| `stateDir` | Yes | — | Private SQLite and optional upload storage |
+| `stateDir` | Yes | — | Private SQLite, manager IPC socket, and optional upload storage |
+| `interAgent` | No | disabled | Explicit opposite-role Slack app peers and delegation bounds |
 | `credentials` | No | systemd | Local-only absolute token-file paths |
 
 ### `slack`
@@ -236,6 +242,31 @@ Use `progressMode: raw` only when everyone who can see the Slack thread may see 
 | `maxActiveSessions` | No | `1` | Concurrent Pi turns for this runtime, maximum 32 |
 | `idleTimeoutMs` | No | `300000` | Stop an idle Pi subprocess while retaining its session |
 | `requestTimeoutMs` | No | `30000` | Pi RPC request timeout |
+
+### `interAgent`
+
+Inter-agent communication is disabled when this block is absent. Managers list workers; workers list managers. Every peer requires a stable `agentId`, the opposite `role`, the sender Slack `appId`, and sender `botUserId`. Peer app IDs, bot user IDs, and agent IDs must be unique, and a runtime cannot trust its own app.
+
+```yaml
+interAgent:
+  peers:
+    - agentId: msboard
+      role: worker       # use manager on the worker's reciprocal config
+      appId: A00000000000
+      botUserId: U00000000000
+  requestTimeoutMs: 900000
+  maxTaskChars: 30000
+  maxResponseChars: 50000
+```
+
+| Field | Required | Default | Description |
+| --- | :---: | --- | --- |
+| `peers` | Yes | — | 1–32 explicitly trusted opposite-role agent identities |
+| `requestTimeoutMs` | No | `900000` | How long a manager tool waits for the worker, 10 seconds–1 hour |
+| `maxTaskChars` | No | `30000` | Delegated task bound, maximum 37,000 to fit one Slack message |
+| `maxResponseChars` | No | `50000` | Aggregated worker response bound, maximum 100,000 |
+
+Both apps must be installed in the same workspace and invited to the originating public/private channel. Delegation from an app DM is rejected because another app cannot share that DM. The runtime loads `delegate_to_worker` only for shared-channel sessions of a manager with configured worker peers.
 
 ## Slack manifests and permissions
 
@@ -277,14 +308,15 @@ See [Operations](docs/operations.md) for onboarding, rollout, and failure handli
 ## Message lifecycle
 
 1. Bolt acknowledges a Slack Socket Mode event.
-2. The runtime validates workspace, app, conversation type, sender, bot status, subtype, and file limits.
+2. The runtime validates workspace, receiving app, conversation type, sender, bot status, subtype, and file limits. Inter-agent envelopes additionally require an exact configured sender app and bot user.
 3. The event ID is claimed in SQLite; retries become no-ops.
 4. The Slack thread is mapped to a durable conversation record.
 5. A new Pi session receives bounded prior thread context.
 6. A Pi RPC subprocess starts or resumes and runs under the configured Unix account.
 7. Explicit requests receive throttled progress updates; ambient manager observations do not.
 8. Final text is rendered to Slack, or a manager's silent decision produces no message.
-9. The Pi process hibernates after the idle timeout; its JSONL session remains resumable.
+9. A delegated worker response is correlated, reassembled, and returned to the waiting manager tool without allocating a second manager turn.
+10. The Pi process hibernates after the idle timeout; its JSONL session remains resumable.
 
 ## Security model
 
@@ -295,7 +327,7 @@ Core controls:
 - dedicated Slack app and Unix account per agent;
 - exact team/app checks and mandatory human allowlist;
 - worker role by default;
-- bot-message rejection to prevent loops;
+- bot-message rejection to prevent loops, except versioned correlated envelopes from exact configured peers;
 - no message body logging;
 - untrusted-context markers around Slack history;
 - bounded thread context, files, concurrency, and RPC operations;
@@ -346,6 +378,7 @@ manifests/          generic and role-specific Slack app manifests
 deploy/             systemd unit and credential importer
 docs/               architecture, roles, security, setup, operations, plan
 src/config/         strict YAML schema and credential loading
+src/inter-agent/    manager Pi tool, private IPC gateway, and Slack peer protocol
 src/pi/             Pi RPC client and session pool
 src/routing/        authorization, conversation identity, queues
 src/slack/          Slack bridge, parsing, rendering, manager policy, files/UI
@@ -361,6 +394,7 @@ test/               unit and contract tests
 - No shared-channel/Slack Connect authorization model.
 - No per-chat Git worktree isolation yet.
 - Manager evaluation consumes a Pi turn for every qualifying human channel message.
+- Delegation requires both apps in the same Slack channel; an in-flight manager tool is not resumable across a runtime restart, although the worker's Slack result remains visible.
 - Slack app manifest updates are managed in Slack; bot/app Socket Mode tokens cannot administer manifests.
 
 ## Documentation
@@ -374,3 +408,4 @@ test/               unit and contract tests
 - [Operations](docs/operations.md)
 - [Implementation plan](docs/PLAN.md)
 - [Runtime ADR](docs/adr/0001-runtime.md)
+- [Inter-agent delegation ADR](docs/adr/0002-inter-agent-delegation.md)

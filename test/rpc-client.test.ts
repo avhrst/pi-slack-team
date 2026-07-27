@@ -137,6 +137,44 @@ describe("RpcClient", () => {
     await rpc.stop();
   });
 
+  it("loads explicit runtime extensions with per-session environment", async () => {
+    const fakeProcess = new FakeRpcProcess();
+    let invocation:
+      | { command: string; args: string[]; env: NodeJS.ProcessEnv }
+      | undefined;
+    const rpc = new RpcClient(
+      {
+        command: "/usr/bin/pi",
+        cwd: "/tmp",
+        agentDir: "/tmp/fake-agent",
+        sessionDir: "/tmp/fake-sessions",
+        sessionName: "test",
+        requestTimeoutMs: 2_000,
+        extensionPaths: ["/opt/pi-slack-team/delegate-extension.js"],
+        environment: { PI_SLACK_TEAM_TEST_CONTEXT: "context-1" },
+      },
+      (command, args, options) => {
+        invocation = { command, args, env: options.env };
+        return fakeProcess as unknown as ChildProcessWithoutNullStreams;
+      },
+    );
+
+    await rpc.start();
+    expect(invocation?.command).toBe("/usr/bin/pi");
+    expect(invocation?.args.slice(0, 4)).toEqual([
+      "--mode",
+      "rpc",
+      "--extension",
+      "/opt/pi-slack-team/delegate-extension.js",
+    ]);
+    expect(invocation?.env).toMatchObject({
+      PI_SLACK_TEAM_TEST_CONTEXT: "context-1",
+      PI_CODING_AGENT_DIR: "/tmp/fake-agent",
+      PI_CODING_AGENT_SESSION_DIR: "/tmp/fake-sessions",
+    });
+    await rpc.stop();
+  });
+
   it("reports malformed protocol records without logging their content", async () => {
     const { rpc } = setup();
     const protocolError = new Promise<Error>((resolve) =>

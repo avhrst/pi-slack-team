@@ -1,4 +1,8 @@
 import type { AgentConfig } from "../config/schema.js";
+import {
+  incomingDelegationRequest,
+  type IncomingDelegationRequest,
+} from "../inter-agent/protocol.js";
 import type { Logger } from "../observability/logger.js";
 import type { PiTurnResult } from "../pi/session-pool.js";
 import {
@@ -53,7 +57,8 @@ export class ChatService {
     message: IncomingSlackMessage,
     hooks: MessageHooks = {},
   ): Promise<MessageDisposition> {
-    const rejection = this.#rejectionReason(message);
+    const delegation = incomingDelegationRequest(this.#config, message);
+    const rejection = this.#rejectionReason(message, delegation);
     if (rejection) {
       this.#logger.warn("slack_message_ignored", {
         agentId: this.#config.agentId,
@@ -73,10 +78,11 @@ export class ChatService {
     const sharedManagerChannel =
       this.#config.role === "manager" &&
       ["channel-message", "app-mention"].includes(message.kind);
+    const sharedConversation = sharedManagerChannel || Boolean(delegation);
     if (
       existing &&
       existing.ownerUserId !== message.userId &&
-      !sharedManagerChannel
+      !sharedConversation
     ) {
       this.#logger.warn("slack_conversation_owner_mismatch", {
         agentId: this.#config.agentId,
@@ -91,7 +97,7 @@ export class ChatService {
       ? await hooks.preparePrompt({ isNewConversation: !existing?.piSessionFile })
       : message.text;
     const ownerUserId = existing?.ownerUserId ?? message.userId;
-    const result = sharedManagerChannel
+    const result = sharedConversation
       ? await this.#pool.prompt(
           key,
           ownerUserId,
@@ -117,7 +123,10 @@ export class ChatService {
     return false;
   }
 
-  #rejectionReason(message: IncomingSlackMessage): string | undefined {
+  #rejectionReason(
+    message: IncomingSlackMessage,
+    delegation: IncomingDelegationRequest | undefined,
+  ): string | undefined {
     if (message.teamId !== this.#config.slack.teamId) return "wrong-team";
     if (message.appId !== this.#config.slack.appId) return "wrong-app";
     const validDirectMessage =
@@ -140,8 +149,13 @@ export class ChatService {
     ) {
       return "unsupported-conversation";
     }
-    if (!this.#allowedUsers.has(message.userId)) return "unauthorized-user";
-    if (message.botId) return "bot-message";
+    if (message.botId && !delegation) return "bot-message";
+    if (!message.botId && !this.#allowedUsers.has(message.userId)) {
+      return "unauthorized-user";
+    }
+    if (delegation && message.files.length > 0) {
+      return "inter-agent-files-unsupported";
+    }
     if (message.files.length > this.#config.slack.maxFilesPerMessage) {
       return "too-many-files";
     }
@@ -154,7 +168,10 @@ export class ChatService {
     }
     if (
       message.subtype &&
-      !(message.subtype === "file_share" && message.files.length > 0)
+      !(
+        (message.subtype === "file_share" && message.files.length > 0) ||
+        (delegation && message.subtype === "bot_message")
+      )
     ) {
       return "unsupported-subtype";
     }

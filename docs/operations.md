@@ -23,7 +23,8 @@ Recommended production layout:
 7. Run `pi-slack-team doctor`.
 8. Enable one systemd unit.
 9. For an upload-enabled agent, add `files:read` to its manifest and set `slack.fileUploads: true`; keep count and byte limits bounded.
-10. Complete the canary acceptance test before onboarding another agent.
+10. For manager-to-worker delegation, add reciprocal `interAgent.peers` entries using the sender app ID and the `botUserId` logged by `slack_connected`; invite both apps to every channel where delegation is allowed.
+11. Complete the canary acceptance test before onboarding another agent.
 
 For initial provisioning, an owner-only agent environment file may be imported
 into the root-managed systemd credential directory:
@@ -54,6 +55,15 @@ For a worker, verify an ordinary channel message is ignored and an explicit ment
 
 For a manager, send an authorized human channel message **without** a mention. A working mention validates only `app_mention`, not `message.channels`. Verify that ambient evaluation posts no progress message and can remain silent. Test public and private channels independently when both are in scope.
 
+For each configured manager/worker pair:
+
+1. Verify both `slack_connected` identities against the reciprocal peer entries.
+2. Invite both apps to one bounded canary channel.
+3. Ask the manager to delegate a harmless read-only task with `delegate_to_worker`.
+4. Verify one correlated manager mention, one worker turn, and one result returned inside the original manager turn.
+5. Verify an ordinary bot message, a wrong app ID, a malformed marker, and a worker response without a pending request do not allocate a Pi turn.
+6. Restart the manager during a harmless in-flight canary and verify the wait fails closed; do not use a destructive task for this test.
+
 See [Slack app setup](slack-setup.md#10-canary-checklist) for the full checklist and troubleshooting.
 
 ## Changing roles
@@ -64,6 +74,6 @@ Demoting a manager to worker takes effect at the runtime authorization layer imm
 
 ## Failure handling
 
-The runtime acknowledges Slack delivery before starting Pi work and records the event ID before prompt submission. A duplicate Slack event is ignored. Manager apps ignore bot-authored events and route explicit mentions through the mention listener so one Slack message cannot execute both an ambient and explicit turn.
+The runtime acknowledges Slack delivery before starting Pi work and records the event ID before prompt submission. A duplicate Slack event is ignored. Manager apps ignore ordinary bot-authored events and route explicit mentions through the mention listener so one Slack message cannot execute both an ambient and explicit turn. A valid correlated worker response is consumed before UI or chat routing and resolves only its matching pending delegation.
 
-On shutdown, the worker stops accepting new events, lets bounded cleanup run, terminates child Pi processes, and closes SQLite. Persistent Pi session files remain available for the next start.
+On shutdown, the worker stops accepting new events, lets bounded cleanup run, terminates child Pi processes, and closes SQLite. A manager also closes its private delegation socket and rejects pending waits. Persistent Pi session files remain available for the next start.

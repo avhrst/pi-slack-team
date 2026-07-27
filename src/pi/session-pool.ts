@@ -1,4 +1,6 @@
+import { fileURLToPath } from "node:url";
 import type { AgentConfig } from "../config/schema.js";
+import { interAgentExtensionEnvironment } from "../inter-agent/environment.js";
 import type { Logger } from "../observability/logger.js";
 import {
   KeyedSerialQueue,
@@ -28,6 +30,10 @@ export interface PiUiRequestContext {
 export type PiUiHandler = (
   context: PiUiRequestContext,
 ) => Promise<Record<string, unknown>>;
+
+const INTER_AGENT_EXTENSION_PATH = fileURLToPath(
+  new URL("../inter-agent/delegate-extension.js", import.meta.url),
+);
 
 interface SessionHandle {
   client: RpcClientLike;
@@ -181,12 +187,22 @@ export class PiSessionPool {
     const existing = this.#handles.get(serialized);
     if (existing?.client.running) return existing;
 
+    const interAgentEnvironment = interAgentExtensionEnvironment(
+      this.#config,
+      key,
+    );
     const client = this.#clientFactory({
       command: this.#config.pi.command,
       cwd: this.#config.pi.cwd,
       agentDir: this.#config.pi.agentDir,
       sessionDir: this.#config.pi.sessionDir,
       requestTimeoutMs: this.#config.pi.requestTimeoutMs,
+      ...(interAgentEnvironment
+        ? {
+            extensionPaths: [INTER_AGENT_EXTENSION_PATH],
+            environment: interAgentEnvironment,
+          }
+        : {}),
       ...(conversation.piSessionFile
         ? { sessionFile: conversation.piSessionFile }
         : { sessionName: `slack-${key.threadTs.replace(/\W/g, "-").slice(0, 48)}` }),

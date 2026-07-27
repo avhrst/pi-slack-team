@@ -99,6 +99,8 @@ describe("Slack event parsing", () => {
           user: "U01",
           ts: "123.456",
           text: "<@UBOT> please investigate\n  this issue",
+          bot_id: "BMANAGER",
+          app_id: "A02",
         },
         "UBOT",
       ),
@@ -107,7 +109,29 @@ describe("Slack event parsing", () => {
       channelId: "C01",
       channelType: "channel",
       text: "please investigate\n  this issue",
+      botId: "BMANAGER",
+      senderAppId: "A02",
     });
+  });
+
+  it("preserves correlated envelope payload whitespace", () => {
+    expect(
+      parseAppMentionEvent(
+        body,
+        {
+          channel: "C01",
+          user: "UWORKER",
+          ts: "123.456",
+          text:
+            "<@UBOT> [pi-slack-team:v1:response:123e4567-e89b-12d3-a456-426614174000:ok:1/2]\nchunk ",
+          bot_id: "BWORKER",
+          bot_profile: { app_id: "A02" },
+        },
+        "UBOT",
+      )?.text,
+    ).toBe(
+      "[pi-slack-team:v1:response:123e4567-e89b-12d3-a456-426614174000:ok:1/2]\nchunk ",
+    );
   });
 
   it("rejects an app mention event that does not mention this bot", () => {

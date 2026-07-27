@@ -16,6 +16,7 @@ const temporaryDirectories: string[] = [];
 function setup(
   fileUploads = false,
   role: "worker" | "manager" = "worker",
+  interAgent = false,
 ) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-slack-team-chat-"));
   temporaryDirectories.push(directory);
@@ -31,6 +32,20 @@ function setup(
       allowedUserIds: ["U01", "U02"],
       fileUploads,
     },
+    ...(interAgent
+      ? {
+          interAgent: {
+            peers: [
+              {
+                agentId: role === "worker" ? "coordinator" : "specialist",
+                role: role === "worker" ? "manager" : "worker",
+                appId: "A02",
+                botUserId: role === "worker" ? "UMANAGER" : "UWORKER",
+              },
+            ],
+          },
+        }
+      : {}),
     pi: {
       cwd: directory,
       agentDir: directory,
@@ -166,6 +181,41 @@ describe("ChatService", () => {
       ),
     ).resolves.toMatchObject({ type: "ignored", reason: "bot-message" });
     expect(prompt).not.toHaveBeenCalled();
+    registry.close();
+  });
+
+  it("accepts only a correlated app mention from a configured manager bot", async () => {
+    const { service, prompt, registry } = setup(false, "worker", true);
+    const delegated = message({
+      kind: "app-mention",
+      channelId: "C01",
+      channelType: "channel",
+      userId: "UMANAGER",
+      text:
+        "[pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nImplement the task",
+      subtype: "bot_message",
+      botId: "BMANAGER",
+      senderAppId: "A02",
+    });
+
+    await expect(service.handleMessage(delegated)).resolves.toMatchObject({
+      type: "completed",
+    });
+    expect(prompt).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "UMANAGER",
+      delegated.text,
+      undefined,
+      true,
+    );
+
+    await expect(
+      service.handleMessage({
+        ...delegated,
+        eventId: "Ev02",
+        senderAppId: "A99",
+      }),
+    ).resolves.toMatchObject({ type: "ignored", reason: "bot-message" });
     registry.close();
   });
 

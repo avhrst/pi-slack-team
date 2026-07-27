@@ -13,6 +13,23 @@ slack:
     - U0000000000
   progressMode: summary
 
+# Replace each synthetic peer identity and configure the reciprocal dev peer on
+# that worker before enabling delegation.
+interAgent:
+  peers:
+    - agentId: deploy
+      role: worker
+      appId: A00000000000
+      botUserId: U00000000000
+    - agentId: msboard
+      role: worker
+      appId: A000000000000
+      botUserId: U000000000000
+    - agentId: support
+      role: worker
+      appId: A0000000000000
+      botUserId: U0000000000000
+
 pi:
   command: /usr/bin/pi
   cwd: /home/dev-agent

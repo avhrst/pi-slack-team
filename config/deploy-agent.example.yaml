@@ -16,6 +16,13 @@ slack:
   maxFileBytes: 20971520
   maxFilesPerMessage: 5
 
+interAgent:
+  peers:
+    - agentId: dev
+      role: manager
+      appId: A00000000000
+      botUserId: U00000000000
+
 pi:
   command: /usr/bin/pi
   cwd: /home/deploy-agent/ms-app-update

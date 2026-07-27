@@ -15,7 +15,8 @@ role: worker # or manager
 | Authorized direct messages | Processed | Processed |
 | Explicit `@agent` mention in a public/private channel | Processed | Processed |
 | Ordinary authorized human message in a joined channel | Ignored | Evaluated |
-| Bot-authored message | Ignored | Ignored |
+| Ordinary bot-authored message | Ignored | Ignored |
+| Correlated envelope from an exact configured opposite-role peer | Manager request only | Worker response only |
 | Message from a user outside `allowedUserIds` | Ignored | Ignored |
 | Visible `Working…` progress for explicit requests | Yes | Yes |
 | Visible progress for ambient channel observations | N/A | No |
@@ -62,6 +63,27 @@ Ambient turns do not post a `Working…` message or stream tool progress. This p
 
 Use [the manager Slack manifest](../manifests/manager-agent.example.yaml) as the public template.
 
+## Manager-to-worker communication
+
+Inter-agent communication is opt-in and does not relax the ordinary bot-message rejection rule. Configure reciprocal peers under `interAgent`:
+
+- the manager lists each worker with `role: worker`, its Slack app ID, and bot user ID;
+- each worker lists the manager with `role: manager`, its Slack app ID, and bot user ID;
+- both apps must be invited to the originating shared channel.
+
+A configured manager Pi session for a shared channel thread receives `delegate_to_worker`. The tool sends one bounded, versioned request envelope as an explicit worker mention in the current Slack thread. The worker runtime accepts it only when all of these match:
+
+- receiving workspace/app and channel constraints;
+- bot-authored explicit `app_mention` event;
+- sender app ID and bot user ID from the reciprocal peer entry;
+- request correlation format, size, subtype, and empty attachment set.
+
+The worker uses its normal per-thread persistent Pi session and its own Unix identity, tools, credentials, working directory, and instructions. Its response explicitly mentions the manager with the same correlation ID. The manager runtime consumes response chunks directly into the waiting tool call instead of creating another manager Pi turn, which prevents recursive agent loops. A worker-side error is returned as a failed tool call.
+
+Interactive Pi dialogs are cancelled during a delegated turn. A worker that requires human approval must report that blocker rather than treating the manager bot as a human approver. Ordinary bot text, malformed envelopes, unconfigured apps, wrong-role peers, files, DMs, and orphaned responses remain fail-closed.
+
+`allowedUserIds` continues to authorize humans only. `interAgent.peers` is a separate transitive trust decision: configure a manager only when its policy is permitted to invoke that worker's capabilities.
+
 ## Tools and Jira behavior
 
 The runtime does not contain Jira-specific automation. It exposes the Slack observation to the configured Pi agent. Whether a manager searches or creates Jira issues depends on:
@@ -91,7 +113,7 @@ The durable conversation key is:
 
 A root message uses its own timestamp as `thread_ts`. The first accepted user becomes the durable conversation owner.
 
-- Workers reject later turns from another user in the same thread.
+- Workers reject later turns from another human in the same thread, but a configured manager delegation may continue the worker's thread session while preserving its first owner.
 - Managers allow other authorized humans to contribute channel turns to the same Pi session.
 - Interactive Pi confirmations remain bound to the first owner to prevent cross-user approval.
 
@@ -128,6 +150,7 @@ A manager evaluates more events and can create many persistent sessions. Keep ch
 4. Invite the app only to channels it should observe.
 5. Restart the runtime.
 6. Send one authorized channel message without mentioning the app and verify either a useful response or a logged silent decision.
-7. Verify bot and unauthorized-user messages do not allocate Pi sessions.
+7. Verify ordinary bot and unauthorized-user messages do not allocate Pi sessions.
+8. If inter-agent delegation is configured, canary `delegate_to_worker` in a shared channel, verify the worker result returns to the same manager turn, then test an unconfigured bot and malformed correlation marker.
 
 See [Slack app setup](slack-setup.md) for the complete procedure.

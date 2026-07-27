@@ -22,6 +22,7 @@ export interface IncomingSlackMessage {
   files: IncomingSlackFile[];
   subtype?: string;
   botId?: string;
+  senderAppId?: string;
 }
 
 export function conversationKey(

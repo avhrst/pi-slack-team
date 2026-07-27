@@ -16,6 +16,18 @@ slack:
   maxFileBytes: 20971520
   maxFilesPerMessage: 5
 
+# Optional, fail-closed manager -> worker delegation. Both apps must be in the
+# originating channel. appId and botUserId identify the sending worker app.
+interAgent:
+  peers:
+    - agentId: example-worker
+      role: worker
+      appId: A00000000000
+      botUserId: U00000000000
+  requestTimeoutMs: 900000
+  maxTaskChars: 30000
+  maxResponseChars: 50000
+
 pi:
   command: /usr/bin/pi
   cwd: /home/pi-manager

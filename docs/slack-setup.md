@@ -81,7 +81,7 @@ The runtime config needs:
 
 These are identifiers, not credentials, but production values should still stay in the machine-specific config rather than public examples. The example configs use synthetic IDs.
 
-The app ID is shown under **Basic Information**. User IDs are available from the Slack profile menu. Ensure `allowedUserIds` contains humans who are authorized to invoke every tool available to that Unix agent.
+The app ID is shown under **Basic Information**. Human user IDs are available from the Slack profile menu. The bot user ID is reported as `botUserId` in the runtime's `slack_connected` log after a successful canary connection. Ensure `allowedUserIds` contains humans who are authorized to invoke every tool available to that Unix agent. Never put bot IDs in this human allowlist; use `interAgent.peers` for explicit manager/worker trust.
 
 ## 6. Create runtime configuration
 
@@ -105,6 +105,14 @@ slack:
   allowedUserIds:
     - U0000000000
   progressMode: summary
+
+# Optional manager example. Put the reciprocal manager identity on the worker.
+interAgent:
+  peers:
+    - agentId: specialist
+      role: worker
+      appId: A00000000000
+      botUserId: U00000000000
 
 pi:
   command: /usr/bin/pi
@@ -155,7 +163,9 @@ Do not commit this block with real paths if those paths reveal private infrastru
 
 A manager can observe only channels whose events Slack delivers to that bot identity. Invite it deliberately to each public/private channel in scope.
 
-Channel membership is not authorization. A message still must come from `allowedUserIds` before Pi runs. Bot-authored messages are ignored to prevent loops.
+Channel membership is not authorization. A human message still must come from `allowedUserIds` before Pi runs. Ordinary bot-authored messages are ignored to prevent loops. Inter-agent messages require a reciprocal peer entry plus an exact sender app ID, bot user ID, role/direction, explicit mention, and correlation envelope.
+
+For delegation, invite both the manager and target worker app to the same channel. Slack app DMs cannot be shared with another app, so `delegate_to_worker` intentionally rejects DM conversations.
 
 ## 9. Validate and start
 
@@ -189,7 +199,7 @@ systemctl enable --now pi-slack-team@<unix-user>.service
 - Authorized DM creates one Pi session and one final response.
 - Authorized channel mention creates/resumes the correct thread session.
 - An unmentioned channel message creates no session.
-- Unauthorized and bot-authored messages create no session.
+- Unauthorized and ordinary bot-authored messages create no session.
 - A repeated Slack event executes no second Pi turn.
 
 ### Manager
@@ -202,6 +212,17 @@ Complete the worker checks, then:
 - A clearly actionable message can produce one threaded response or allowed tool action.
 - Bot and unauthorized-user messages create no Pi session.
 - Public and private channel delivery are tested separately when both are required.
+
+### Inter-agent delegation
+
+Complete both role checklists, then:
+
+- Reciprocal peer entries use the exact `appId` and logged `botUserId` of the other runtime.
+- Both apps are members of the canary channel.
+- The manager lists `delegate_to_worker` in its Pi tools and can delegate a harmless read-only task.
+- The worker request and response stay in the originating thread, and the response returns to the current manager turn.
+- A malformed marker, unconfigured bot, ordinary bot message, attachment, and DM delegation fail closed.
+- A worker confirmation request is cancelled and reported as a blocker rather than approved by a bot.
 
 ## Troubleshooting
 
@@ -217,6 +238,19 @@ Check all of the following:
 6. Runtime logs show `slack_connected` with `role: manager`.
 
 A working `@mention` proves `app_mention`, not `message.channels`; always test one message without a mention.
+
+### `delegate_to_worker` is missing or times out
+
+Check all of the following:
+
+1. The manager config has at least one `interAgent.peers` entry with `role: worker`.
+2. The worker has the reciprocal manager entry; both sender `appId` and `botUserId` are exact.
+3. Both services were restarted after config changes, and the manager log contains `inter_agent_gateway_started`.
+4. Both apps are installed in the same workspace and invited to the current `C…`/`G…` channel.
+5. The worker manifest subscribes to `app_mention` and the manager manifest receives worker mentions.
+6. Runtime logs contain `inter_agent_delegation_started` and either `inter_agent_delegation_completed`, an ignored-event reason, or an orphan/mismatch warning.
+
+Do not add bot IDs to `allowedUserIds`, enable all bot messages, or remove correlation checks as a workaround.
 
 ### `missing_scope`
 

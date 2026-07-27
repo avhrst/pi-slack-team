@@ -32,6 +32,7 @@ describe("manager mode", () => {
     expect(prompt).toContain("not an explicit request");
     expect(prompt).toContain("untrusted user content");
     expect(prompt).toContain("create a non-duplicate Jira issue");
+    expect(prompt).toContain("use it directly instead of asking a human");
     expect(prompt).toContain('"senderUserId": "U01"');
     expect(prompt).toContain("thread context");
     expect(prompt).toContain(MANAGER_SILENT_RESPONSE);

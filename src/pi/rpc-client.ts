@@ -13,6 +13,8 @@ export interface RpcClientOptions {
   sessionFile?: string;
   sessionName?: string;
   requestTimeoutMs: number;
+  extensionPaths?: string[];
+  environment?: NodeJS.ProcessEnv;
 }
 
 export type RpcSpawner = (
@@ -67,6 +69,9 @@ export class RpcClient extends EventEmitter {
     if (this.#child) throw new Error("RPC client has already been started");
 
     const args = ["--mode", "rpc"];
+    for (const extensionPath of this.#options.extensionPaths ?? []) {
+      args.push("--extension", extensionPath);
+    }
     if (this.#options.sessionFile) {
       args.push("--session", this.#options.sessionFile);
     } else {
@@ -83,6 +88,7 @@ export class RpcClient extends EventEmitter {
         cwd: this.#options.cwd,
         env: {
           ...process.env,
+          ...this.#options.environment,
           PI_CODING_AGENT_DIR: this.#options.agentDir,
           PI_CODING_AGENT_SESSION_DIR: this.#options.sessionDir,
         },
