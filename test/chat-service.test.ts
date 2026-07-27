@@ -219,6 +219,83 @@ describe("ChatService", () => {
     registry.close();
   });
 
+  it("lets an authorized human claim an idle manager-created worker thread", async () => {
+    const { service, prompt, registry } = setup(false, "worker", true);
+    const key = {
+      teamId: "T01",
+      appId: "A01",
+      channelId: "C01",
+      threadTs: "123.456",
+    };
+    registry.createConversation(key, "UMANAGER");
+    registry.setSession(key, "/tmp/session.jsonl", "session-01");
+
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "app-mention",
+          eventId: "Ev02",
+          channelId: "C01",
+          channelType: "channel",
+          userId: "U01",
+          threadTs: "123.456",
+          ts: "124.000",
+          text: "continue directly",
+        }),
+      ),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(registry.getConversation(key)?.ownerUserId).toBe("U01");
+    expect(prompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "U01",
+      "continue directly",
+      undefined,
+    );
+
+    const delegated = message({
+      kind: "app-mention",
+      eventId: "Ev03",
+      channelId: "C01",
+      channelType: "channel",
+      userId: "UMANAGER",
+      threadTs: "123.456",
+      ts: "125.000",
+      text:
+        "[pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nContinue through manager",
+      subtype: "bot_message",
+      botId: "BMANAGER",
+      senderAppId: "A02",
+    });
+    await expect(service.handleMessage(delegated)).resolves.toMatchObject({
+      type: "completed",
+    });
+    expect(prompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "U01",
+      delegated.text,
+      undefined,
+      true,
+    );
+
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "app-mention",
+          eventId: "Ev04",
+          channelId: "C01",
+          channelType: "channel",
+          userId: "U02",
+          threadTs: "123.456",
+          ts: "126.000",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      type: "ignored",
+      reason: "conversation-owner-mismatch",
+    });
+    registry.close();
+  });
+
   it("allows authorized participants to continue a manager channel thread", async () => {
     const { service, prompt, registry } = setup(false, "manager");
     registry.createConversation(
@@ -296,6 +373,35 @@ describe("ChatService", () => {
       "help in this channel",
       undefined,
     );
+    registry.close();
+  });
+
+  it("accepts human thread broadcasts but rejects edits and bot broadcasts", async () => {
+    const { service, prompt, registry } = setup();
+    const broadcast = {
+      kind: "app-mention" as const,
+      channelId: "C01",
+      channelType: "channel",
+      subtype: "thread_broadcast",
+    };
+
+    await expect(
+      service.handleMessage(message(broadcast)),
+    ).resolves.toMatchObject({ type: "completed" });
+    await expect(
+      service.handleMessage(
+        message({ ...broadcast, eventId: "Ev02", subtype: "message_changed" }),
+      ),
+    ).resolves.toMatchObject({
+      type: "ignored",
+      reason: "unsupported-subtype",
+    });
+    await expect(
+      service.handleMessage(
+        message({ ...broadcast, eventId: "Ev03", botId: "B01" }),
+      ),
+    ).resolves.toMatchObject({ type: "ignored", reason: "bot-message" });
+    expect(prompt).toHaveBeenCalledTimes(1);
     registry.close();
   });
 

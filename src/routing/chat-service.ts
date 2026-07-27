@@ -39,6 +39,7 @@ export class ChatService {
   readonly #pool: PiPromptRunner;
   readonly #logger: Logger;
   readonly #allowedUsers: Set<string>;
+  readonly #managerBotUsers: Set<string>;
 
   constructor(
     config: AgentConfig,
@@ -51,6 +52,11 @@ export class ChatService {
     this.#pool = pool;
     this.#logger = logger;
     this.#allowedUsers = new Set(config.slack.allowedUserIds);
+    this.#managerBotUsers = new Set(
+      config.interAgent?.peers
+        .filter((peer) => peer.role === "manager")
+        .map((peer) => peer.botUserId) ?? [],
+    );
   }
 
   async handleMessage(
@@ -74,7 +80,32 @@ export class ChatService {
     }
 
     const key = conversationKey(message);
-    const existing = this.#registry.getConversation(key);
+    let existing = this.#registry.getConversation(key);
+    const humanClaimingManagerOwnedThread = Boolean(
+      existing &&
+      this.#config.role === "worker" &&
+      message.kind === "app-mention" &&
+      !message.botId &&
+      existing.ownerUserId !== message.userId &&
+      this.#managerBotUsers.has(existing.ownerUserId),
+    );
+    if (existing && humanClaimingManagerOwnedThread) {
+      const previousOwnerUserId = existing.ownerUserId;
+      const claimed = this.#registry.transferConversationOwner(
+        key,
+        previousOwnerUserId,
+        message.userId,
+      );
+      if (claimed) {
+        existing = claimed;
+        this.#logger.info("slack_delegated_conversation_claimed", {
+          agentId: this.#config.agentId,
+          eventId: message.eventId,
+          previousOwnerUserId,
+          userId: message.userId,
+        });
+      }
+    }
     const sharedManagerChannel =
       this.#config.role === "manager" &&
       ["channel-message", "app-mention"].includes(message.kind);
@@ -166,11 +197,16 @@ export class ChatService {
     ) {
       return "file-uploads-disabled";
     }
+    const validHumanThreadBroadcast =
+      message.subtype === "thread_broadcast" &&
+      !message.botId &&
+      (validChannelMention || validManagerObservation);
     if (
       message.subtype &&
       !(
         (message.subtype === "file_share" && message.files.length > 0) ||
-        (delegation && message.subtype === "bot_message")
+        (delegation && message.subtype === "bot_message") ||
+        validHumanThreadBroadcast
       )
     ) {
       return "unsupported-subtype";

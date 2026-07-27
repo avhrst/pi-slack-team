@@ -111,11 +111,14 @@ The durable conversation key is:
 (team_id, app_id, channel_id, thread_ts)
 ```
 
-A root message uses its own timestamp as `thread_ts`. The first accepted user becomes the durable conversation owner.
+A root message uses its own timestamp as `thread_ts`. The first accepted human normally becomes the durable conversation owner. A configured manager bot is a provisional owner when its delegation creates a worker conversation.
 
-- Workers reject later turns from another human in the same thread, but a configured manager delegation may continue the worker's thread session while preserving its first owner.
+- The first allowed human who explicitly mentions that worker after the delegated turn is idle may atomically claim the provisional bot-owned conversation. This preserves the Pi session while binding future confirmations to a human.
+- Workers reject takeover by another human after a human owns the thread. Configured manager delegations may still continue that worker session while preserving its human owner.
 - Managers allow other authorized humans to contribute channel turns to the same Pi session.
-- Interactive Pi confirmations remain bound to the first owner to prevent cross-user approval.
+- Interactive Pi confirmations remain bound to the durable human owner to prevent cross-user approval.
+- Human thread replies broadcast to the channel (`thread_broadcast`) are accepted under the same mention/authorization checks.
+- Slack message edits are not executable events. Send a new DM or explicit mention instead of editing an existing message to invoke an agent.
 
 New sessions receive bounded prior thread context. Existing sessions resume from their Pi JSONL file and do not receive the full transcript again.
 

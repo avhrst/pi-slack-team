@@ -157,6 +157,31 @@ export class Registry {
     return conversation;
   }
 
+  transferConversationOwner(
+    key: ConversationKey,
+    expectedOwnerUserId: string,
+    newOwnerUserId: string,
+    now = new Date(),
+  ): ConversationRecord | undefined {
+    const result = this.#database
+      .prepare(
+        `UPDATE conversations
+            SET owner_user_id = ?, last_activity_at = ?
+          WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
+            AND owner_user_id = ? AND status IN ('idle', 'error')`,
+      )
+      .run(
+        newOwnerUserId,
+        now.toISOString(),
+        key.teamId,
+        key.appId,
+        key.channelId,
+        key.threadTs,
+        expectedOwnerUserId,
+      );
+    return result.changes === 1 ? this.getConversation(key) : undefined;
+  }
+
   setSession(
     key: ConversationKey,
     sessionFile: string,

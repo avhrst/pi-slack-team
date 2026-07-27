@@ -38,6 +38,8 @@ Inter-agent delegation preserves this boundary: Slack carries the request betwee
 
 Configuring a manager peer is a transitive authorization decision. The worker will treat a correctly authenticated manager envelope as an authorized request even though the manager bot is not in `allowedUserIds`. Keep peer lists narrow, use exact app and bot-user IDs, and ensure manager instructions apply the originating human's authorization and all worker safety constraints before delegation.
 
+A manager bot that creates a worker conversation is a provisional owner only. Ownership transfer requires an explicit mention from an allowed human, an exact configured manager bot as the existing owner, and an idle or error conversation. The compare-and-set update permits only one claimant; after a human claim, normal worker anti-takeover checks apply.
+
 ## Interactive requests
 
 Pi confirmation and selection requests are bound to:

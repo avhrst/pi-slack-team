@@ -33,6 +33,38 @@ describe("Registry", () => {
     registry.close();
   });
 
+  it("transfers an idle conversation owner with compare-and-set semantics", () => {
+    const registry = createRegistry();
+    registry.createConversation(key, "UMANAGER");
+
+    expect(
+      registry.transferConversationOwner(key, "UMANAGER", "U01"),
+    ).toBeUndefined();
+
+    registry.setSession(key, "/tmp/session.jsonl", "session-01");
+    expect(
+      registry.transferConversationOwner(
+        key,
+        "UMANAGER",
+        "U01",
+        new Date("2026-07-27T10:00:00.000Z"),
+      ),
+    ).toMatchObject({
+      ownerUserId: "U01",
+      status: "idle",
+      lastActivityAt: "2026-07-27T10:00:00.000Z",
+    });
+    expect(
+      registry.transferConversationOwner(key, "UMANAGER", "U02"),
+    ).toBeUndefined();
+
+    registry.setStatus(key, "running");
+    expect(
+      registry.transferConversationOwner(key, "U01", "U02"),
+    ).toBeUndefined();
+    registry.close();
+  });
+
   it("persists conversation ownership and Pi session metadata", () => {
     const registry = createRegistry();
     const created = registry.createConversation(key, "U01");
