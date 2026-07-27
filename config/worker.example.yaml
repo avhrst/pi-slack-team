@@ -1,8 +1,8 @@
 version: 1
-agentId: support
+agentId: example-worker
 role: worker
-expectedUnixUser: support-agent
-stateDir: /home/support-agent/.local/state/pi-slack-team
+expectedUnixUser: pi-worker
+stateDir: /home/pi-worker/.local/state/pi-slack-team
 
 slack:
   # Synthetic IDs: replace all three values for the target workspace/app/user.
@@ -10,22 +10,26 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  # summary hides tool arguments/output; raw exposes them in the Slack conversation.
+  # summary hides tool arguments/output; raw exposes them in Slack.
   progressMode: summary
+  fileUploads: false
+  maxFileBytes: 20971520
+  maxFilesPerMessage: 5
 
 pi:
   command: /usr/bin/pi
-  cwd: /home/support-agent
-  agentDir: /home/support-agent/.pi/agent
-  sessionDir: /home/support-agent/.pi/agent/sessions
+  cwd: /home/pi-worker
+  agentDir: /home/pi-worker/.pi/agent
+  sessionDir: /home/pi-worker/.pi/agent/sessions
   maxActiveSessions: 1
   idleTimeoutMs: 300000
+  requestTimeoutMs: 30000
 
 # Production credentials are loaded from systemd:
 #   $CREDENTIALS_DIRECTORY/slack_bot_token
 #   $CREDENTIALS_DIRECTORY/slack_app_token
 #
-# For local development only, point at owner-readable files:
+# For local development only, point to owner-readable absolute paths:
 # credentials:
 #   botTokenFile: /secure/path/slack_bot_token
 #   appTokenFile: /secure/path/slack_app_token

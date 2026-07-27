@@ -24,9 +24,9 @@ function validConfig() {
     expectedUnixUser: "support-agent",
     stateDir: "/home/support-agent/.local/state/pi-slack-team",
     slack: {
-      teamId: "T0123456789",
-      appId: "A0123456789",
-      allowedUserIds: ["U0123456789"],
+      teamId: "T0000000000",
+      appId: "A0000000000",
+      allowedUserIds: ["U0000000000"],
     },
     pi: {
       cwd: "/home/support-agent",
@@ -64,13 +64,26 @@ describe("agent config", () => {
     expect(config.slack.progressMode).toBe("raw");
   });
 
-  it("configures the dev agent example as a manager", () => {
-    const config = loadConfig(path.resolve("config/dev-agent.example.yaml"));
-    expect(config).toMatchObject({
-      agentId: "dev",
-      role: "manager",
-      expectedUnixUser: "dev-agent",
+  it("provides valid public examples for both roles", () => {
+    const worker = loadConfig(path.resolve("config/worker.example.yaml"));
+    const manager = loadConfig(path.resolve("config/manager.example.yaml"));
+
+    expect(worker).toMatchObject({
+      agentId: "example-worker",
+      role: "worker",
+      expectedUnixUser: "pi-worker",
     });
+    expect(manager).toMatchObject({
+      agentId: "example-manager",
+      role: "manager",
+      expectedUnixUser: "pi-manager",
+    });
+    expect(worker.slack).toMatchObject({
+      teamId: "T0000000000",
+      appId: "A0000000000",
+      allowedUserIds: ["U0000000000"],
+    });
+    expect(manager.slack).toMatchObject(worker.slack);
   });
 
   it("requires at least one allowed Slack user", () => {

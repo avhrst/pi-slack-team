@@ -54,7 +54,7 @@ Exit: a clean `pnpm check` and `pnpm build`.
 ### 2. Slack runtime
 
 - Bolt Socket Mode
-- Slack Agent manifest template
+- secret-free worker and manager Slack Agent manifest examples
 - exact workspace/app/user authorization
 - immediate event acknowledgement
 - duplicate-event suppression

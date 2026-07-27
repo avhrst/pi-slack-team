@@ -15,8 +15,8 @@ Recommended production layout:
 ## Onboarding
 
 1. Choose `role: worker` or `role: manager` in the secret-free agent config (`worker` is the default).
-2. Create a dedicated Slack app from the manifest template.
-3. For a manager, add `message.channels` and `message.groups` bot event subscriptions, then invite the app only to channels it should observe. The existing `channels:history` and `groups:history` scopes are required.
+2. Create a dedicated Slack app from the matching public template: [worker](../manifests/worker-agent.example.yaml) or [manager](../manifests/manager-agent.example.yaml).
+3. For a manager, verify `message.channels` and `message.groups` bot event subscriptions, then invite the app only to channels it should observe. The existing `channels:history` and `groups:history` scopes are required.
 4. Enable Socket Mode and create an app-level token with `connections:write`.
 5. Install the app and obtain its bot token.
 6. Store both credentials outside Git.
@@ -35,8 +35,32 @@ node deploy/import-env-credentials.mjs \
 ```
 
 The environment file must have mode `0600` and contain exactly
-`SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN`. The importer never overwrites a
-different existing credential.
+`SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN`. The importer never prints values or
+overwrites a different existing credential.
+
+## Canary rollout
+
+Roll out one runtime at a time. Before restart, verify that it has no active Pi child process or `running` conversation record.
+
+For every role:
+
+1. Confirm `slack_connected` reports the expected `agentId`, role, team, and bot user.
+2. Send one authorized DM and verify exactly one Pi turn and final response.
+3. Retry the same event or inspect deduplication tests; it must not execute twice.
+4. Confirm an unauthorized human and a bot cannot allocate a session.
+5. Restart the runtime and verify an existing Slack thread resumes its Pi session.
+
+For a worker, verify an ordinary channel message is ignored and an explicit mention is accepted.
+
+For a manager, send an authorized human channel message **without** a mention. A working mention validates only `app_mention`, not `message.channels`. Verify that ambient evaluation posts no progress message and can remain silent. Test public and private channels independently when both are in scope.
+
+See [Slack app setup](slack-setup.md#10-canary-checklist) for the full checklist and troubleshooting.
+
+## Changing roles
+
+Changing config alone is insufficient when promoting a worker to manager. Slack must also have `message.channels` and `message.groups` in bot event subscriptions. Apply the manager manifest, save the Slack configuration, invite the app to bounded channels, restart, and perform an unmentioned-message canary.
+
+Demoting a manager to worker takes effect at the runtime authorization layer immediately after restart. Remove the ambient Slack event subscriptions as defense in depth and reduce unnecessary event delivery.
 
 ## Failure handling
 

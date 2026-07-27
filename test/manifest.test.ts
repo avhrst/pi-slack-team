@@ -53,30 +53,60 @@ describe("Slack app manifest", () => {
     }
   });
 
-  it("uses Agent view, Socket Mode, DMs, and channel mentions", () => {
-    const manifest = parse(
-      fs.readFileSync("manifests/slack-agent.template.yaml", "utf8"),
-    ) as {
-      features: Record<string, unknown>;
-      settings: {
-        socket_mode_enabled: boolean;
-        event_subscriptions: { bot_events: string[] };
-      };
-    };
+  it("provides secret-free public examples for worker and manager roles", () => {
+    const expectedEvents = new Map<string, string[]>([
+      [
+        "worker-agent.example.yaml",
+        [
+          "app_home_opened",
+          "app_mention",
+          "assistant_thread_started",
+          "message.im",
+        ],
+      ],
+      [
+        "manager-agent.example.yaml",
+        [
+          "app_home_opened",
+          "app_mention",
+          "assistant_thread_started",
+          "message.channels",
+          "message.groups",
+          "message.im",
+        ],
+      ],
+    ]);
 
-    expect(manifest.features).toHaveProperty("agent_view");
-    expect(manifest.settings.socket_mode_enabled).toBe(true);
-    expect(manifest.settings.event_subscriptions.bot_events).toEqual(
-      expect.arrayContaining([
-        "app_home_opened",
-        "app_mention",
-        "assistant_thread_started",
-        "message.im",
-      ]),
-    );
-    expect(manifest.settings.event_subscriptions.bot_events).not.toContain(
-      "message.channels",
-    );
+    for (const [file, events] of expectedEvents) {
+      const source = fs.readFileSync(`manifests/${file}`, "utf8");
+      const manifest = parse(source) as {
+        display_information: { name: string; description: string };
+        features: Record<string, unknown>;
+        oauth_config: { scopes: { bot: string[] } };
+        settings: {
+          interactivity: { is_enabled: boolean };
+          socket_mode_enabled: boolean;
+          event_subscriptions: { bot_events: string[] };
+        };
+      };
+
+      expect(manifest.display_information.name).toMatch(/^Example Pi /);
+      expect(manifest.display_information.description.length).toBeGreaterThan(0);
+      expect(manifest.features).toHaveProperty("agent_view");
+      expect(manifest.oauth_config.scopes.bot).toEqual([
+        "app_mentions:read",
+        "assistant:write",
+        "channels:history",
+        "chat:write",
+        "groups:history",
+        "im:history",
+      ]);
+      expect(manifest.settings.event_subscriptions.bot_events).toEqual(events);
+      expect(manifest.settings.interactivity.is_enabled).toBe(false);
+      expect(manifest.settings.socket_mode_enabled).toBe(true);
+      expect(source).not.toMatch(/xox[baprs]-[A-Za-z0-9-]+/u);
+      expect(source).not.toMatch(/\b[TAUW][A-Z0-9]{10,}\b/u);
+    }
   });
 
   it("keeps the support agent manifest least-privileged", () => {

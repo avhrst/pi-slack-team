@@ -8,4 +8,12 @@ coverage/
 *.sqlite-shm
 *.sqlite-wal
 *.token
+*.jsonl
+*.pem
+*.key
+.pi/
+credentials/
+uploads/
+sessions/
+config/*.local.yaml
 .DS_Store

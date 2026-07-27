@@ -5,11 +5,12 @@ expectedUnixUser: dev-agent
 stateDir: /home/dev-agent/.local/state/pi-slack-team
 
 slack:
-  teamId: T0123456789
-  appId: A0123456789
+  # Synthetic IDs: replace all three values for the target workspace/app/user.
+  teamId: T0000000000
+  appId: A0000000000
   # Manager observations remain restricted to explicitly authorized humans.
   allowedUserIds:
-    - U0123456789
+    - U0000000000
   progressMode: summary
 
 pi:

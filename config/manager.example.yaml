@@ -1,0 +1,37 @@
+version: 1
+agentId: example-manager
+role: manager
+expectedUnixUser: pi-manager
+stateDir: /home/pi-manager/.local/state/pi-slack-team
+
+slack:
+  # Synthetic IDs: replace all three values for the target workspace/app/user.
+  teamId: T0000000000
+  appId: A0000000000
+  # Ambient observations remain restricted to explicitly authorized humans.
+  allowedUserIds:
+    - U0000000000
+  progressMode: summary
+  fileUploads: false
+  maxFileBytes: 20971520
+  maxFilesPerMessage: 5
+
+pi:
+  command: /usr/bin/pi
+  cwd: /home/pi-manager
+  agentDir: /home/pi-manager/.pi/agent
+  sessionDir: /home/pi-manager/.pi/agent/sessions
+  # Managers may receive many events; start with serialized turns.
+  maxActiveSessions: 1
+  idleTimeoutMs: 300000
+  requestTimeoutMs: 30000
+
+# The Slack app must use manifests/manager-agent.example.yaml.
+# Production credentials are loaded from systemd:
+#   $CREDENTIALS_DIRECTORY/slack_bot_token
+#   $CREDENTIALS_DIRECTORY/slack_app_token
+#
+# For local development only, point to owner-readable absolute paths:
+# credentials:
+#   botTokenFile: /secure/path/slack_bot_token
+#   appTokenFile: /secure/path/slack_app_token

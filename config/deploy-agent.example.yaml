@@ -5,10 +5,11 @@ expectedUnixUser: deploy-agent
 stateDir: /home/deploy-agent/.local/state/pi-slack-team
 
 slack:
-  teamId: T0123456789
-  appId: A0123456789
+  # Synthetic IDs: replace all three values for the target workspace/app/user.
+  teamId: T0000000000
+  appId: A0000000000
   allowedUserIds:
-    - U0123456789
+    - U0000000000
   progressMode: summary
   # Requires the files:read scope included in manifests/deploy-agent.yaml.
   fileUploads: true

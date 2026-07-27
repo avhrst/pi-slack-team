@@ -25,7 +25,7 @@ The MVP therefore defaults to:
 
 Production workers read `slack_bot_token` and `slack_app_token` from the systemd credentials directory. Local development may point to owner-readable credential files.
 
-The repository is public. Examples must always contain placeholders and `.gitignore` covers common local secret files.
+The repository is public. Generic manifests contain scopes and events only; example runtime configs use visibly synthetic IDs. `.gitignore` covers common local secret, token, SQLite, upload, session, and log files. Follow the pre-commit and incident-response rules in [SECURITY.md](../SECURITY.md).
 
 ## Linux isolation
 

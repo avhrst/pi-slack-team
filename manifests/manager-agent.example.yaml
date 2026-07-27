@@ -1,0 +1,52 @@
+display_information:
+  name: Example Pi Manager
+  description: Proactive Pi manager for authorized conversations in joined channels.
+  background_color: "#2457a6"
+  long_description: >-
+    Example Pi Manager connects one Slack app to one Linux-isolated Pi agent.
+    In addition to direct messages and mentions, it evaluates authorized human
+    messages in every public or private channel it joins. It intervenes only
+    when useful and otherwise remains silent. Each Slack thread maps to a
+    separate persistent Pi session.
+
+features:
+  bot_user:
+    display_name: Example Pi Manager
+    always_online: true
+  agent_view:
+    agent_description: Coordinate work and proactively act on relevant channel messages.
+    suggested_prompts:
+      - title: Coordinate work
+        message: Review this request and coordinate the appropriate next steps.
+      - title: Track durable work
+        message: Determine whether this work needs durable tracking.
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - assistant:write
+      - channels:history
+      - chat:write
+      - groups:history
+      - im:history
+      # Add files:read only when slack.fileUploads is explicitly enabled.
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - assistant_thread_started
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    is_enabled: false
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false
