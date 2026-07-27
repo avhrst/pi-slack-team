@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseAppMentionEvent,
+  parseChannelMessageEvent,
   parseMessageEvent,
 } from "../src/slack/parse-event.js";
 
@@ -44,6 +45,49 @@ describe("Slack event parsing", () => {
         },
       ],
     });
+  });
+
+  it("parses ambient public and private channel messages", () => {
+    expect(
+      parseChannelMessageEvent(body, {
+        channel: "C01",
+        channel_type: "channel",
+        user: "U01",
+        ts: "123.456",
+        text: "we should track this bug",
+      }),
+    ).toMatchObject({
+      kind: "channel-message",
+      channelId: "C01",
+      channelType: "channel",
+      text: "we should track this bug",
+    });
+    expect(
+      parseChannelMessageEvent(body, {
+        channel: "G01",
+        user: "U01",
+        ts: "123.457",
+        text: "private discussion",
+      }),
+    ).toMatchObject({
+      kind: "channel-message",
+      channelType: "group",
+    });
+  });
+
+  it("leaves explicit mentions to the app mention listener", () => {
+    expect(
+      parseChannelMessageEvent(
+        body,
+        {
+          channel: "C01",
+          user: "U01",
+          ts: "123.456",
+          text: "<@UBOT> please investigate",
+        },
+        "UBOT",
+      ),
+    ).toBeUndefined();
   });
 
   it("parses channel mentions and removes only the agent mention", () => {

@@ -65,13 +65,13 @@ function parseEvent(
   const channelId = requiredString(event, "channel");
   const channelType =
     requiredString(event, "channel_type") ??
-    (kind === "app-mention" && channelId
-      ? channelId.startsWith("C")
+    (channelId?.startsWith("D")
+      ? "im"
+      : channelId?.startsWith("C")
         ? "channel"
-        : channelId.startsWith("G")
+        : channelId?.startsWith("G")
           ? "group"
-          : undefined
-      : undefined);
+          : undefined);
   const userId = requiredString(event, "user");
   const ts = requiredString(event, "ts");
   const rawText = requiredString(event, "text");
@@ -112,7 +112,30 @@ export function parseMessageEvent(
   bodyValue: unknown,
   eventValue: unknown,
 ): IncomingSlackMessage | undefined {
-  return parseEvent(bodyValue, eventValue, "direct-message");
+  const message = parseEvent(bodyValue, eventValue, "direct-message");
+  return message?.channelType === "im" && message.channelId.startsWith("D")
+    ? message
+    : undefined;
+}
+
+export function parseChannelMessageEvent(
+  bodyValue: unknown,
+  eventValue: unknown,
+  botUserId?: string,
+): IncomingSlackMessage | undefined {
+  const message = parseEvent(bodyValue, eventValue, "channel-message");
+  if (
+    !message ||
+    !["channel", "group"].includes(message.channelType) ||
+    !["C", "G"].some((prefix) => message.channelId.startsWith(prefix))
+  ) {
+    return undefined;
+  }
+  if (botUserId && message.text.includes(`<@${botUserId}>`)) {
+    // The app_mention listener handles explicit requests and strips the mention.
+    return undefined;
+  }
+  return message;
 }
 
 export function parseAppMentionEvent(

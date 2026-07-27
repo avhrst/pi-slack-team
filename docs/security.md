@@ -6,12 +6,15 @@ Slack is a remote command surface for a coding agent. An authorized Slack user c
 
 The MVP therefore defaults to:
 
-- direct messages and explicit app mentions only;
-- a required explicit Slack user allowlist for both DMs and channel mentions;
+- `role: worker` by default, accepting direct messages and explicit app mentions only;
+- manager channel observation is an explicit opt-in and is limited to Slack channels the app joined;
+- a required explicit Slack user allowlist for DMs, mentions, and manager observations;
 - one Slack app per Unix agent;
 - Slack progress defaults to visible assistant text and tool names only;
 - `progressMode: raw` is an explicit per-agent opt-in that exposes tool arguments and output in the authorized conversation;
 - private model thinking is never sent to Slack in either progress mode;
+- bot-authored channel messages are ignored so managers cannot recursively trigger one another;
+- ambient manager turns publish no working/progress message and produce no Slack output when the agent selects the silent decision;
 - no message body logging;
 - new sessions receive at most 200 prior Slack thread messages and 50,000 characters, marked as untrusted conversation context;
 - file uploads are disabled by default and bounded by configured count and size limits;

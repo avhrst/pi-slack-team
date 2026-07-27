@@ -4,8 +4,10 @@ display_information:
   background_color: "#2457a6"
   long_description: >-
     Pinet Dev coordinates engineering work, manages Jira and Confluence context,
-    routes implementation to specialist agents, tracks progress, and reports
-    results. Each Slack thread uses an isolated persistent Pi session.
+    and passively evaluates authorized human messages in every channel it joins.
+    It intervenes only when useful, routes implementation to specialist agents,
+    tracks progress, and reports results. Each Slack thread uses an isolated
+    persistent Pi session.
 
 features:
   bot_user:
@@ -40,6 +42,8 @@ settings:
     bot_events:
       - app_home_opened
       - app_mention
+      - message.channels
+      - message.groups
       - message.im
   interactivity:
     is_enabled: false

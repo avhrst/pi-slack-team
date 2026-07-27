@@ -7,7 +7,16 @@ import type { RpcRecord } from "../pi/rpc-client.js";
 import type { PiUiRequestContext } from "../pi/session-pool.js";
 import type { IncomingSlackMessage } from "../routing/chat-key.js";
 import { downloadSlackFiles } from "./file-download.js";
-import { parseAppMentionEvent, parseMessageEvent } from "./parse-event.js";
+import {
+  parseAppMentionEvent,
+  parseChannelMessageEvent,
+  parseMessageEvent,
+} from "./parse-event.js";
+import {
+  managerObservationContent,
+  managerObservationPrompt,
+  managerVisibleResponse,
+} from "./manager-mode.js";
 import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
 import { SlackUiBroker } from "./slack-ui.js";
 import { addSlackThreadContext } from "./thread-context.js";
@@ -137,6 +146,7 @@ export class SlackBridge {
     await this.#app.start();
     this.#logger.info("slack_connected", {
       agentId: this.#config.agentId,
+      role: this.#config.role,
       teamId: identity.team_id,
       botUserId: identity.user_id,
     });
@@ -161,8 +171,18 @@ export class SlackBridge {
 
   #registerListeners(): void {
     this.#app.event("message", async ({ body, event, client }) => {
-      const message = parseMessageEvent(body, event);
-      if (message) await this.#routeMessage(message, client);
+      const directMessage = parseMessageEvent(body, event);
+      if (directMessage) {
+        await this.#routeMessage(directMessage, client);
+        return;
+      }
+      if (this.#config.role !== "manager") return;
+      const channelMessage = parseChannelMessageEvent(
+        body,
+        event,
+        this.#botUserId,
+      );
+      if (channelMessage) await this.#routeMessage(channelMessage, client);
     });
 
     this.#app.event("app_mention", async ({ body, event, client }) => {
@@ -212,6 +232,8 @@ export class SlackBridge {
     message: IncomingSlackMessage,
     client: App["client"],
   ): Promise<void> {
+    const managerObservation =
+      this.#config.role === "manager" && message.kind === "channel-message";
     let workingTs: string | undefined;
     const progress = new SlackProgressReporter(
       this.#config.slack.progressMode,
@@ -234,6 +256,7 @@ export class SlackBridge {
     try {
       const disposition = await this.#chatService.handleMessage(message, {
         onAccepted: async () => {
+          if (managerObservation) return;
           const posted = await client.chat.postMessage({
             channel: message.channelId,
             thread_ts: message.threadTs ?? message.ts,
@@ -242,36 +265,56 @@ export class SlackBridge {
           workingTs = posted.ts;
         },
         preparePrompt: async ({ isNewConversation }) => {
-          const currentPrompt = await downloadSlackFiles(
-            this.#config,
-            message,
-            this.#botToken,
-          );
-          if (!isNewConversation) return currentPrompt;
-          try {
-            return await addSlackThreadContext(
-              message,
-              currentPrompt,
-              (arguments_) => client.conversations.replies(arguments_),
-            );
-          } catch (error) {
-            this.#logger.warn("slack_thread_context_failed", {
-              agentId: this.#config.agentId,
-              eventId: message.eventId,
-              error,
-            });
-            return currentPrompt;
+          const currentPrompt =
+            managerObservation && !this.#config.slack.fileUploads
+              ? managerObservationContent(message)
+              : await downloadSlackFiles(
+                  this.#config,
+                  message,
+                  this.#botToken,
+                );
+          let prompt = currentPrompt;
+          if (isNewConversation) {
+            try {
+              prompt = await addSlackThreadContext(
+                message,
+                currentPrompt,
+                (arguments_) => client.conversations.replies(arguments_),
+              );
+            } catch (error) {
+              this.#logger.warn("slack_thread_context_failed", {
+                agentId: this.#config.agentId,
+                eventId: message.eventId,
+                error,
+              });
+            }
           }
+          return managerObservation
+            ? managerObservationPrompt(message, prompt)
+            : prompt;
         },
         onPiEvent: (event) => progress.record(event),
       });
-      if (disposition.type !== "completed" || !workingTs) {
+      if (disposition.type !== "completed") {
         await progress.close();
         return;
       }
 
-      await progress.complete(disposition.result.text);
-      const outputChunks = chunks(toSlackMrkdwn(disposition.result.text));
+      const responseText = managerObservation
+        ? managerVisibleResponse(disposition.result.text)
+        : disposition.result.text;
+      if (!responseText) {
+        await progress.close();
+        this.#logger.info("manager_observation_silent", {
+          agentId: this.#config.agentId,
+          eventId: message.eventId,
+        });
+        return;
+      }
+
+      if (workingTs) await progress.complete(responseText);
+      else await progress.close();
+      const outputChunks = chunks(toSlackMrkdwn(responseText));
       if (outputChunks.length === 0) {
         outputChunks.push("Pi completed without a text response.");
       }

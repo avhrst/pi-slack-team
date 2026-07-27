@@ -14,6 +14,7 @@ export const agentConfigSchema = z
   .object({
     version: z.literal(1),
     agentId: z.string().regex(/^[a-z][a-z0-9-]{1,62}$/),
+    role: z.enum(["worker", "manager"]).default("worker"),
     expectedUnixUser: z.string().regex(/^[a-z_][a-z0-9_-]*[$]?$/),
     stateDir: absolutePath,
     slack: z

@@ -34,6 +34,9 @@ settings:
       - app_mention
       - assistant_thread_started
       - message.im
+      # For role: manager, also subscribe to:
+      # - message.channels
+      # - message.groups
   interactivity:
     is_enabled: true
   socket_mode_enabled: true

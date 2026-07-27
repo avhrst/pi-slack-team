@@ -25,6 +25,7 @@ export interface PiPromptRunner {
     ownerUserId: string,
     text: string,
     onEvent?: (event: RpcRecord) => void,
+    allowExistingOwner?: boolean,
   ): Promise<PiTurnResult>;
 }
 
@@ -69,7 +70,14 @@ export class ChatService {
 
     const key = conversationKey(message);
     const existing = this.#registry.getConversation(key);
-    if (existing && existing.ownerUserId !== message.userId) {
+    const sharedManagerChannel =
+      this.#config.role === "manager" &&
+      ["channel-message", "app-mention"].includes(message.kind);
+    if (
+      existing &&
+      existing.ownerUserId !== message.userId &&
+      !sharedManagerChannel
+    ) {
       this.#logger.warn("slack_conversation_owner_mismatch", {
         agentId: this.#config.agentId,
         eventId: message.eventId,
@@ -82,12 +90,21 @@ export class ChatService {
     const promptText = hooks.preparePrompt
       ? await hooks.preparePrompt({ isNewConversation: !existing?.piSessionFile })
       : message.text;
-    const result = await this.#pool.prompt(
-      key,
-      message.userId,
-      promptText,
-      hooks.onPiEvent,
-    );
+    const ownerUserId = existing?.ownerUserId ?? message.userId;
+    const result = sharedManagerChannel
+      ? await this.#pool.prompt(
+          key,
+          ownerUserId,
+          promptText,
+          hooks.onPiEvent,
+          true,
+        )
+      : await this.#pool.prompt(
+          key,
+          ownerUserId,
+          promptText,
+          hooks.onPiEvent,
+        );
     return { type: "completed", result };
   }
 
@@ -111,7 +128,16 @@ export class ChatService {
       message.kind === "app-mention" &&
       ["channel", "group"].includes(message.channelType) &&
       ["C", "G"].some((prefix) => message.channelId.startsWith(prefix));
-    if (!validDirectMessage && !validChannelMention) {
+    const validManagerObservation =
+      this.#config.role === "manager" &&
+      message.kind === "channel-message" &&
+      ["channel", "group"].includes(message.channelType) &&
+      ["C", "G"].some((prefix) => message.channelId.startsWith(prefix));
+    if (
+      !validDirectMessage &&
+      !validChannelMention &&
+      !validManagerObservation
+    ) {
       return "unsupported-conversation";
     }
     if (!this.#allowedUsers.has(message.userId)) return "unauthorized-user";
@@ -119,7 +145,11 @@ export class ChatService {
     if (message.files.length > this.#config.slack.maxFilesPerMessage) {
       return "too-many-files";
     }
-    if (message.files.length > 0 && !this.#config.slack.fileUploads) {
+    if (
+      message.files.length > 0 &&
+      !this.#config.slack.fileUploads &&
+      !validManagerObservation
+    ) {
       return "file-uploads-disabled";
     }
     if (

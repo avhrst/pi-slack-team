@@ -1,0 +1,26 @@
+version: 1
+agentId: dev
+role: manager
+expectedUnixUser: dev-agent
+stateDir: /home/dev-agent/.local/state/pi-slack-team
+
+slack:
+  teamId: T0123456789
+  appId: A0123456789
+  # Manager observations remain restricted to explicitly authorized humans.
+  allowedUserIds:
+    - U0123456789
+  progressMode: summary
+
+pi:
+  command: /usr/bin/pi
+  cwd: /home/dev-agent
+  agentDir: /home/dev-agent/.pi/agent
+  sessionDir: /home/dev-agent/.pi/agent/sessions
+  maxActiveSessions: 1
+  idleTimeoutMs: 300000
+
+# The Slack app must subscribe to message.channels and message.groups in
+# addition to the worker events. Production credentials are loaded from:
+#   $CREDENTIALS_DIRECTORY/slack_bot_token
+#   $CREDENTIALS_DIRECTORY/slack_app_token

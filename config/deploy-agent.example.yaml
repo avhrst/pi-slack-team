@@ -1,5 +1,6 @@
 version: 1
 agentId: deploy
+role: worker
 expectedUnixUser: deploy-agent
 stateDir: /home/deploy-agent/.local/state/pi-slack-team
 

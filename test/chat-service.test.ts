@@ -13,12 +13,16 @@ import { Registry } from "../src/storage/registry.js";
 
 const temporaryDirectories: string[] = [];
 
-function setup(fileUploads = false) {
+function setup(
+  fileUploads = false,
+  role: "worker" | "manager" = "worker",
+) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-slack-team-chat-"));
   temporaryDirectories.push(directory);
   const config = agentConfigSchema.parse({
     version: 1,
     agentId: "support",
+    role,
     expectedUnixUser: "support-agent",
     stateDir: directory,
     slack: {
@@ -108,6 +112,7 @@ describe("ChatService", () => {
     await expect(
       service.handleMessage(
         message({
+          kind: "channel-message",
           eventId: "Ev03",
           channelId: "C01",
           channelType: "channel",
@@ -118,6 +123,108 @@ describe("ChatService", () => {
       reason: "unsupported-conversation",
     });
     expect(prompt).not.toHaveBeenCalled();
+    registry.close();
+  });
+
+  it("lets a manager evaluate authorized ambient channel messages", async () => {
+    const { service, prompt, registry } = setup(false, "manager");
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "channel-message",
+          channelId: "C01",
+          channelType: "channel",
+          text: "this regression needs a ticket",
+        }),
+      ),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "U01",
+      "this regression needs a ticket",
+      undefined,
+      true,
+    );
+    registry.close();
+  });
+
+  it("keeps ambient manager observations authorized and human-only", async () => {
+    const { service, prompt, registry } = setup(false, "manager");
+    const ambient = {
+      kind: "channel-message" as const,
+      channelId: "C01",
+      channelType: "channel",
+    };
+    await expect(
+      service.handleMessage(
+        message({ ...ambient, userId: "U99" }),
+      ),
+    ).resolves.toMatchObject({ type: "ignored", reason: "unauthorized-user" });
+    await expect(
+      service.handleMessage(
+        message({ ...ambient, eventId: "Ev02", botId: "B01" }),
+      ),
+    ).resolves.toMatchObject({ type: "ignored", reason: "bot-message" });
+    expect(prompt).not.toHaveBeenCalled();
+    registry.close();
+  });
+
+  it("allows authorized participants to continue a manager channel thread", async () => {
+    const { service, prompt, registry } = setup(false, "manager");
+    registry.createConversation(
+      {
+        teamId: "T01",
+        appId: "A01",
+        channelId: "C01",
+        threadTs: "123.456",
+      },
+      "U01",
+    );
+
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "channel-message",
+          eventId: "Ev02",
+          channelId: "C01",
+          channelType: "channel",
+          userId: "U02",
+          threadTs: "123.456",
+          ts: "124.000",
+        }),
+      ),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "U01",
+      "hello",
+      undefined,
+      true,
+    );
+    registry.close();
+  });
+
+  it("observes file metadata without enabling manager file downloads", async () => {
+    const { service, prompt, registry } = setup(false, "manager");
+    const attachment = {
+      id: "F01",
+      name: "bug.txt",
+      size: 12,
+      urlPrivateDownload: "https://files.slack.com/files-pri/bug.txt",
+    };
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "channel-message",
+          channelId: "C01",
+          channelType: "channel",
+          text: "see evidence",
+          files: [attachment],
+          subtype: "file_share",
+        }),
+      ),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenCalledTimes(1);
     registry.close();
   });
 

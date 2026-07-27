@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  loadConfig,
   loadSlackCredentials,
   resolveCredentialFiles,
 } from "../src/config/load-config.js";
@@ -44,6 +45,7 @@ afterEach(() => {
 describe("agent config", () => {
   it("applies safe runtime defaults", () => {
     const config = validConfig();
+    expect(config.role).toBe("worker");
     expect(config.slack.progressMode).toBe("summary");
     expect(config.slack.fileUploads).toBe(false);
     expect(config.slack.maxFileBytes).toBe(20 * 1_024 * 1_024);
@@ -53,10 +55,22 @@ describe("agent config", () => {
     expect(config.pi.idleTimeoutMs).toBe(300_000);
   });
 
-  it("accepts explicit raw progress output", () => {
+  it("accepts explicit role and raw progress output", () => {
     const input = structuredClone(validConfig());
+    input.role = "manager";
     input.slack.progressMode = "raw";
-    expect(agentConfigSchema.parse(input).slack.progressMode).toBe("raw");
+    const config = agentConfigSchema.parse(input);
+    expect(config.role).toBe("manager");
+    expect(config.slack.progressMode).toBe("raw");
+  });
+
+  it("configures the dev agent example as a manager", () => {
+    const config = loadConfig(path.resolve("config/dev-agent.example.yaml"));
+    expect(config).toMatchObject({
+      agentId: "dev",
+      role: "manager",
+      expectedUnixUser: "dev-agent",
+    });
   });
 
   it("requires at least one allowed Slack user", () => {

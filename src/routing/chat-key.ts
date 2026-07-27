@@ -9,7 +9,7 @@ export interface IncomingSlackFile {
 }
 
 export interface IncomingSlackMessage {
-  kind: "direct-message" | "app-mention";
+  kind: "direct-message" | "app-mention" | "channel-message";
   eventId: string;
   teamId: string;
   appId: string;

@@ -7,7 +7,8 @@ The project is a standalone worker, not an extension attached to one already-run
 - runs as the target agent's Unix account;
 - owns exactly one Slack Socket Mode app connection;
 - accepts only configured Slack workspace and user IDs;
-- responds to DMs and explicit `@agent` mentions in channels;
+- runs as a `worker` (DMs and explicit `@agent` mentions) or an opt-in `manager`;
+- lets managers evaluate every authorized human message in joined public/private channels and remain silent when no intervention is useful;
 - optionally downloads authorized Slack attachments into private agent storage;
 - maps each Slack DM or channel thread to a persistent Pi JSONL session;
 - bootstraps a new Pi session with bounded prior Slack thread history and a title derived from the root message;
@@ -31,7 +32,7 @@ corepack pnpm check
 corepack pnpm build
 ```
 
-Create a local config from [config/agent.example.yaml](config/agent.example.yaml). Keep Slack credentials outside the repository.
+Create a local worker config from [config/agent.example.yaml](config/agent.example.yaml), or a manager config from [config/dev-agent.example.yaml](config/dev-agent.example.yaml). Keep Slack credentials outside the repository. Manager Slack apps must additionally subscribe to `message.channels` and `message.groups`; channel membership and `allowedUserIds` bound what is processed.
 
 ```bash
 corepack pnpm build

@@ -5,10 +5,10 @@ import { parse } from "yaml";
 describe("Slack app manifest", () => {
   it("provides a valid role-specific manifest for every Pi agent", () => {
     const expected = new Map([
-      ["deploy-agent.yaml", "Pinet Deploy"],
-      ["dev-agent.yaml", "Pinet Dev"],
-      ["msboard-agent.yaml", "Pinet MSBoard"],
-      ["support-agent.yaml", "Pinet Support"],
+      ["deploy-agent.yaml", { name: "Pinet Deploy", manager: false }],
+      ["dev-agent.yaml", { name: "Pinet Dev", manager: true }],
+      ["msboard-agent.yaml", { name: "Pinet MSBoard", manager: false }],
+      ["support-agent.yaml", { name: "Pinet Support", manager: false }],
     ]);
     const files = fs
       .readdirSync("manifests")
@@ -28,9 +28,9 @@ describe("Slack app manifest", () => {
           event_subscriptions: { bot_events: string[] };
         };
       };
-      const name = expected.get(file);
-      expect(manifest.display_information.name).toBe(name);
-      expect(manifest.features.bot_user.display_name).toBe(name);
+      const expectedAgent = expected.get(file);
+      expect(manifest.display_information.name).toBe(expectedAgent?.name);
+      expect(manifest.features.bot_user.display_name).toBe(expectedAgent?.name);
       expect(manifest.display_information.description.length).toBeGreaterThan(0);
       expect(manifest.oauth_config.scopes.bot).toEqual([
         "app_mentions:read",
@@ -44,6 +44,9 @@ describe("Slack app manifest", () => {
       expect(manifest.settings.event_subscriptions.bot_events).toEqual([
         "app_home_opened",
         "app_mention",
+        ...(expectedAgent?.manager
+          ? ["message.channels", "message.groups"]
+          : []),
         "message.im",
       ]);
       expect(manifest.settings.socket_mode_enabled).toBe(true);

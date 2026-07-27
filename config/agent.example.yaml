@@ -1,5 +1,6 @@
 version: 1
 agentId: support
+role: worker
 expectedUnixUser: support-agent
 stateDir: /home/support-agent/.local/state/pi-slack-team
 

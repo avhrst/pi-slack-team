@@ -65,6 +65,7 @@ async function start(configPath: string): Promise<void> {
   await bridge.start();
   logger.info("runtime_started", {
     agentId: config.agentId,
+    role: config.role,
     unixUser: config.expectedUnixUser,
   });
 }

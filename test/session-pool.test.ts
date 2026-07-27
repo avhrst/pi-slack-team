@@ -167,6 +167,24 @@ describe("PiSessionPool", () => {
     registry.close();
   });
 
+  it("can retain the first owner for an authorized shared manager thread", async () => {
+    const { clients, pool, registry } = setup();
+    const channelKey = { ...key, channelId: "C01" };
+    registry.createConversation(channelKey, "U01");
+
+    await expect(
+      pool.prompt(channelKey, "U02", "blocked by default"),
+    ).rejects.toThrow("another Slack user");
+    await expect(
+      pool.prompt(channelKey, "U02", "manager turn", undefined, true),
+    ).resolves.toMatchObject({ text: "final response" });
+
+    expect(clients).toHaveLength(1);
+    expect(registry.getConversation(channelKey)?.ownerUserId).toBe("U01");
+    await pool.shutdown();
+    registry.close();
+  });
+
   it("cancels a pending UI request when its RPC client exits", async () => {
     const { config, registry, logger } = setup();
     const clients: DialogExitClient[] = [];

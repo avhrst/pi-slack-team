@@ -93,6 +93,7 @@ export class PiSessionPool {
     ownerUserId: string,
     text: string,
     onEvent?: (event: RpcRecord) => void,
+    allowExistingOwner = false,
   ): Promise<PiTurnResult> {
     const serialized = serializeConversationKey(key);
     return this.#queue.run(serialized, () =>
@@ -100,7 +101,10 @@ export class PiSessionPool {
         const conversation =
           this.#registry.getConversation(key) ??
           this.#registry.createConversation(key, ownerUserId);
-        if (conversation.ownerUserId !== ownerUserId) {
+        if (
+          conversation.ownerUserId !== ownerUserId &&
+          !allowExistingOwner
+        ) {
           throw new Error("Conversation belongs to another Slack user");
         }
 

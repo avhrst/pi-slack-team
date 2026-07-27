@@ -2,7 +2,7 @@
 
 ## Goal
 
-Give every Linux-isolated Pi agent its own Slack app. Each new Slack Agent chat creates a distinct persistent Pi session; subsequent messages in the same Slack thread resume that session.
+Give every Linux-isolated Pi agent its own Slack app. Each agent is configured as a `worker` or `manager`. Each new qualifying Slack chat creates a distinct persistent Pi session; subsequent messages in the same Slack thread resume that session.
 
 ## Architecture
 
@@ -33,11 +33,12 @@ There is no root message broker and no shared Slack app token. Each worker inher
 1. `app_home_opened` is presence only and never creates a Pi session.
 2. `assistant_thread_started` may register Slack metadata but session allocation remains lazy.
 3. The first authorized `message.im` or `app_mention` in a new root/thread creates a persistent Pi session.
-4. Later authorized events in that thread resume the same session; channel turns must explicitly mention the agent.
-5. A different Slack thread creates a different Pi session.
-6. Mapping survives worker and Pi subprocess restarts.
-7. Active same-thread inputs are queued deterministically; explicit steering is a separate action.
-8. Idle Pi processes may stop while their session files remain resumable.
+4. For `role: worker`, later channel turns must explicitly mention the agent.
+5. For `role: manager`, authorized human `message.channels` and `message.groups` events also resume or create the thread session; the agent decides whether to act/respond or remain silent.
+6. A different Slack thread creates a different Pi session.
+7. Mapping survives runtime worker and Pi subprocess restarts.
+8. Active same-thread inputs are queued deterministically; explicit steering is a separate action.
+9. Idle Pi processes may stop while their session files remain resumable.
 
 ## Delivery sequence
 
@@ -57,9 +58,10 @@ Exit: a clean `pnpm check` and `pnpm build`.
 - exact workspace/app/user authorization
 - immediate event acknowledgement
 - duplicate-event suppression
-- DMs and explicit channel mentions
+- DMs and explicit channel mentions for workers
+- opt-in ambient public/private channel events for managers, with silent no-op decisions
 
-Exit: a canary bot accepts an allowed DM or channel mention and rejects all other users and event types.
+Exit: a canary worker accepts an allowed DM or channel mention, a canary manager evaluates an allowed ambient channel message without mandatory output, and both reject unauthorized users.
 
 ### 3. Pi RPC runtime
 
