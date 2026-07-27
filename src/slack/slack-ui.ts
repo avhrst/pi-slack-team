@@ -13,6 +13,8 @@ interface PendingDialog {
   options: string[];
   resolve: (response: Record<string, unknown>) => void;
   timer: NodeJS.Timeout;
+  abortSignal: AbortSignal;
+  abortListener: () => void;
 }
 
 export interface SlackUiMessageResult {
@@ -27,7 +29,17 @@ function dialogTimeout(request: Record<string, unknown>): number {
   return Math.min(MAX_DIALOG_TIMEOUT_MS, Math.max(MIN_DIALOG_TIMEOUT_MS, requested - 1_000));
 }
 
-function requestText(request: Record<string, unknown>): string | undefined {
+function responseInstruction(channelId: string, response: string): string {
+  const instruction = `Reply in this thread with ${response}.`;
+  return channelId.startsWith("D")
+    ? instruction
+    : `${instruction} Channel replies must explicitly @mention this agent.`;
+}
+
+function requestText(
+  request: Record<string, unknown>,
+  channelId: string,
+): string | undefined {
   const method = request.method;
   const title = typeof request.title === "string" ? request.title.trim() : "Pi confirmation";
   if (method === "select") {
@@ -38,17 +50,24 @@ function requestText(request: Record<string, unknown>): string | undefined {
     return [
       `*${title}*`,
       ...options.map((option, index) => `${index + 1}. ${option}`),
-      "Reply in this thread with the option number. Reply `cancel` to cancel.",
+      responseInstruction(channelId, "the option number or `cancel`"),
     ].join("\n");
   }
   if (method === "confirm") {
     const message = typeof request.message === "string" ? request.message.trim() : "";
-    return [`*${title}*`, message, "Reply `yes` or `no`. Reply `cancel` to cancel."]
+    return [
+      `*${title}*`,
+      message,
+      responseInstruction(channelId, "`yes`, `no`, or `cancel`"),
+    ]
       .filter(Boolean)
       .join("\n");
   }
   if (method === "input" || method === "editor") {
-    return `*${title}*\nReply in this thread with the requested value. Reply \`cancel\` to cancel.`;
+    return [
+      `*${title}*`,
+      responseInstruction(channelId, "the requested value or `cancel`"),
+    ].join("\n");
   }
   return undefined;
 }
@@ -60,8 +79,15 @@ export class SlackUiBroker {
     context: PiUiRequestContext,
     post: (text: string) => Promise<void>,
   ): Promise<Record<string, unknown>> {
-    const text = requestText(context.request);
-    if (!text || typeof context.request.method !== "string") {
+    const text = requestText(
+      context.request,
+      context.conversation.channelId,
+    );
+    if (
+      !text ||
+      typeof context.request.method !== "string" ||
+      context.signal.aborted
+    ) {
       return { cancelled: true };
     }
 
@@ -71,11 +97,12 @@ export class SlackUiBroker {
     let pending: PendingDialog | undefined;
     const response = new Promise<Record<string, unknown>>((resolve) => {
       const timer = setTimeout(() => {
-        if (this.#pending.get(key) !== pending) return;
-        this.#pending.delete(key);
-        resolve({ cancelled: true });
+        if (pending) this.#resolve(key, pending, { cancelled: true });
       }, dialogTimeout(context.request));
       timer.unref();
+      const abortListener = () => {
+        if (pending) this.#resolve(key, pending, { cancelled: true });
+      };
       pending = {
         method: context.request.method as string,
         ownerUserId: context.conversation.ownerUserId,
@@ -84,33 +111,39 @@ export class SlackUiBroker {
           : [],
         resolve,
         timer,
+        abortSignal: context.signal,
+        abortListener,
       };
       this.#pending.set(key, pending);
+      context.signal.addEventListener("abort", abortListener, { once: true });
     });
 
+    if (context.signal.aborted) return response;
     try {
       await post(text);
     } catch (error) {
-      if (this.#pending.get(key) === pending) this.#pending.delete(key);
-      if (pending) clearTimeout(pending.timer);
-      pending?.resolve({ cancelled: true });
+      if (pending) this.#resolve(key, pending, { cancelled: true });
       throw error;
     }
     return response;
   }
 
-  consume(message: IncomingSlackMessage): SlackUiMessageResult {
+  consume(
+    message: IncomingSlackMessage,
+    claimEvent: (eventId: string) => boolean = () => true,
+  ): SlackUiMessageResult {
     const key = serializeConversationKey(conversationKey(message));
     const pending = this.#pending.get(key);
     if (!pending || message.userId !== pending.ownerUserId || message.botId) {
       return { handled: false };
     }
+    if (!claimEvent(message.eventId)) return { handled: true };
 
     const answer = message.text.trim();
     const normalized = answer.toLocaleLowerCase();
     if (CANCEL_WORDS.has(normalized)) {
       this.#resolve(key, pending, { cancelled: true });
-      return { handled: true, acknowledgement: "APEXlang choice cancelled." };
+      return { handled: true, acknowledgement: "Interactive request cancelled." };
     }
 
     if (pending.method === "select") {
@@ -166,6 +199,7 @@ export class SlackUiBroker {
     if (this.#pending.get(key) !== pending) return;
     this.#pending.delete(key);
     clearTimeout(pending.timer);
+    pending.abortSignal.removeEventListener("abort", pending.abortListener);
     pending.resolve(response);
   }
 }

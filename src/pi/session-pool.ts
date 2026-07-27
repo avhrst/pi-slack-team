@@ -22,6 +22,7 @@ export interface PiTurnResult {
 export interface PiUiRequestContext {
   conversation: ConversationRecord;
   request: RpcRecord;
+  signal: AbortSignal;
 }
 
 export type PiUiHandler = (
@@ -263,11 +264,39 @@ export class PiSessionPool {
     request: RpcRecord,
   ): Promise<void> {
     if (typeof request.id !== "string") return;
+
+    const controller = new AbortController();
+    let resolveStopped: (() => void) | undefined;
+    const stopped = new Promise<{ type: "stopped" }>((resolve) => {
+      resolveStopped = () => resolve({ type: "stopped" });
+    });
+    const onStopped = () => {
+      controller.abort();
+      resolveStopped?.();
+    };
+    client.on("stopped", onStopped);
+
     try {
-      const response = await this.#uiHandler({ conversation, request });
-      client.sendUiResponse({ id: request.id, ...response });
+      const outcome = await Promise.race([
+        this.#uiHandler({
+          conversation,
+          request,
+          signal: controller.signal,
+        }).then((response) => ({ type: "response" as const, response })),
+        stopped,
+      ]);
+      if (outcome.type === "stopped" || !client.running) return;
+      client.sendUiResponse({ id: request.id, ...outcome.response });
     } catch {
-      client.sendUiResponse({ id: request.id, cancelled: true });
+      if (!client.running) return;
+      try {
+        client.sendUiResponse({ id: request.id, cancelled: true });
+      } catch {
+        // The RPC process may exit between the running check and the write.
+      }
+    } finally {
+      client.off("stopped", onStopped);
+      controller.abort();
     }
   }
 

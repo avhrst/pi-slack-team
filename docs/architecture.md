@@ -28,7 +28,7 @@ The durable Slack conversation key is:
 
 For a root message without `thread_ts`, its own `ts` becomes the thread root. The first qualifying message owns the conversation; the owner cannot be changed by later events.
 
-When that first qualifying message creates a Pi session, the worker reads the bounded Slack thread history up to the triggering message. The root message supplies the derived thread title. Prior messages, authors, timestamps, and file metadata are injected as explicitly untrusted user context; the triggering request is kept separate. Resumed Pi sessions do not receive the full transcript again.
+When that first qualifying message creates a Pi session, the worker scans Slack thread history up to the triggering message and injects a bounded snapshot containing the root plus the most recent prior replies. The root message supplies the derived thread title. Prior messages, authors, timestamps, and file metadata are injected as explicitly untrusted user context; the triggering request is kept separate. Resumed Pi sessions do not receive the full transcript again.
 
 ## Process model
 

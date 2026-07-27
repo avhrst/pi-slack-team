@@ -191,7 +191,10 @@ export class SlackBridge {
     message: IncomingSlackMessage,
     client: App["client"],
   ): Promise<void> {
-    const uiResult = this.#uiBroker.consume(message);
+    const uiResult = this.#uiBroker.consume(
+      message,
+      (eventId) => this.#chatService.claimEvent(eventId),
+    );
     if (!uiResult.handled) {
       await this.#handleMessage(message, client);
       return;

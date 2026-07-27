@@ -20,6 +20,7 @@ class FakeClient extends EventEmitter implements RpcClientLike {
   running = false;
   readonly options: RpcClientOptions;
   readonly requests: RpcRecord[] = [];
+  readonly uiResponses: Record<string, unknown>[] = [];
 
   constructor(options: RpcClientOptions) {
     super();
@@ -57,11 +58,38 @@ class FakeClient extends EventEmitter implements RpcClientLike {
     return { type: "response", success: true };
   }
 
-  sendUiResponse(): void {}
+  sendUiResponse(record: Record<string, unknown>): void {
+    if (!this.running) throw new Error("Pi RPC process is not running");
+    this.uiResponses.push(record);
+  }
 
   async stop(): Promise<void> {
     this.running = false;
     this.emit("stopped");
+  }
+}
+
+class DialogExitClient extends FakeClient {
+  override async request(
+    command: Record<string, unknown>,
+  ): Promise<RpcRecord> {
+    if (command.type !== "prompt") return super.request(command);
+    this.requests.push(command as RpcRecord);
+    queueMicrotask(() => {
+      this.emit("event", {
+        type: "extension_ui_request",
+        id: "dialog-1",
+        method: "confirm",
+        title: "Continue?",
+        message: "Run the operation",
+      });
+      queueMicrotask(() => {
+        this.running = false;
+        this.emit("unexpectedExit", { code: 1, signal: null });
+        this.emit("stopped");
+      });
+    });
+    return { type: "response", success: true };
   }
 }
 
@@ -135,6 +163,42 @@ describe("PiSessionPool", () => {
       piSessionId: "session-01",
       status: "idle",
     });
+    await pool.shutdown();
+    registry.close();
+  });
+
+  it("cancels a pending UI request when its RPC client exits", async () => {
+    const { config, registry, logger } = setup();
+    const clients: DialogExitClient[] = [];
+    let uiSignal: AbortSignal | undefined;
+    const pool = new PiSessionPool(
+      config,
+      registry,
+      logger,
+      async ({ signal }) => {
+        uiSignal = signal;
+        return new Promise((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => resolve({ cancelled: true }),
+            { once: true },
+          );
+        });
+      },
+      (options) => {
+        const client = new DialogExitClient(options);
+        clients.push(client);
+        return client;
+      },
+    );
+
+    await expect(pool.prompt(key, "U01", "first")).rejects.toThrow(
+      "Pi exited before the agent settled",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(uiSignal?.aborted).toBe(true);
+    expect(clients[0]?.uiResponses).toEqual([]);
     await pool.shutdown();
     registry.close();
   });

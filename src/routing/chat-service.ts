@@ -63,11 +63,7 @@ export class ChatService {
       return { type: "ignored", reason: rejection };
     }
 
-    if (!this.#registry.claimEvent(message.eventId)) {
-      this.#logger.info("slack_event_duplicate", {
-        agentId: this.#config.agentId,
-        eventId: message.eventId,
-      });
+    if (!this.claimEvent(message.eventId)) {
       return { type: "duplicate" };
     }
 
@@ -84,7 +80,7 @@ export class ChatService {
 
     await hooks.onAccepted?.();
     const promptText = hooks.preparePrompt
-      ? await hooks.preparePrompt({ isNewConversation: !existing })
+      ? await hooks.preparePrompt({ isNewConversation: !existing?.piSessionFile })
       : message.text;
     const result = await this.#pool.prompt(
       key,
@@ -93,6 +89,15 @@ export class ChatService {
       hooks.onPiEvent,
     );
     return { type: "completed", result };
+  }
+
+  claimEvent(eventId: string): boolean {
+    if (this.#registry.claimEvent(eventId)) return true;
+    this.#logger.info("slack_event_duplicate", {
+      agentId: this.#config.agentId,
+      eventId,
+    });
+    return false;
   }
 
   #rejectionReason(message: IncomingSlackMessage): string | undefined {

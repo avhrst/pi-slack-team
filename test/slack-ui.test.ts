@@ -51,6 +51,7 @@ describe("SlackUiBroker", () => {
           options: ["Check only", "Import"],
           timeout: 300_000,
         },
+        signal: new AbortController().signal,
       },
       post,
     );
@@ -75,6 +76,7 @@ describe("SlackUiBroker", () => {
           title: "Choose",
           options: ["Check only", "Import"],
         },
+        signal: new AbortController().signal,
       },
       async () => undefined,
     );
@@ -96,6 +98,7 @@ describe("SlackUiBroker", () => {
           title: "Choose",
           options: ["Check only", "Import"],
         },
+        signal: new AbortController().signal,
       },
       async () => undefined,
     );
@@ -105,6 +108,87 @@ describe("SlackUiBroker", () => {
       acknowledgement: expect.stringContaining("Invalid choice"),
     });
     expect(broker.consume(message("cancel"))).toMatchObject({ handled: true });
+    await expect(pending).resolves.toEqual({ cancelled: true });
+  });
+
+  it("claims a UI event before applying it and ignores duplicate delivery", async () => {
+    const broker = new SlackUiBroker();
+    const pending = broker.request(
+      {
+        conversation,
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-4",
+          method: "select",
+          title: "Choose",
+          options: ["Check only", "Import"],
+        },
+        signal: new AbortController().signal,
+      },
+      async () => undefined,
+    );
+
+    expect(broker.consume(message("2"), () => false)).toEqual({
+      handled: true,
+    });
+    expect(broker.consume(message("1"), () => true)).toMatchObject({
+      handled: true,
+      acknowledgement: expect.stringContaining("Check only"),
+    });
+    await expect(pending).resolves.toEqual({ value: "Check only" });
+  });
+
+  it("cancels and removes a pending dialog when its Pi client stops", async () => {
+    const broker = new SlackUiBroker();
+    const controller = new AbortController();
+    const pending = broker.request(
+      {
+        conversation,
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-5",
+          method: "confirm",
+          title: "Continue?",
+          message: "Run the operation",
+        },
+        signal: controller.signal,
+      },
+      async () => undefined,
+    );
+
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({ cancelled: true });
+    expect(broker.consume(message("yes"))).toEqual({ handled: false });
+  });
+
+  it("requires an explicit agent mention for channel replies", async () => {
+    const broker = new SlackUiBroker();
+    const post = vi.fn(async () => undefined);
+    const pending = broker.request(
+      {
+        conversation: {
+          ...conversation,
+          channelId: "C01",
+        },
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-6",
+          method: "confirm",
+          title: "Continue?",
+          message: "Run the operation",
+        },
+        signal: new AbortController().signal,
+      },
+      post,
+    );
+
+    expect(post).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Channel replies must explicitly @mention this agent",
+      ),
+    );
+    broker.cancelAll();
     await expect(pending).resolves.toEqual({ cancelled: true });
   });
 });

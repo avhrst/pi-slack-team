@@ -31,6 +31,8 @@ export type FetchSlackReplies = (arguments_: {
   channel: string;
   ts: string;
   limit: number;
+  latest: string;
+  inclusive: boolean;
   cursor?: string;
 }) => Promise<SlackRepliesPage>;
 
@@ -100,35 +102,90 @@ function toContext(message: SlackHistoryMessage): ThreadMessageContext | undefin
   };
 }
 
+interface ThreadSnapshot {
+  root?: SlackHistoryMessage;
+  messages: SlackHistoryMessage[];
+  omittedMessages: number;
+}
+
+function compareMessages(
+  left: SlackHistoryMessage,
+  right: SlackHistoryMessage,
+): number {
+  return Number(text(left.ts)) - Number(text(right.ts));
+}
+
 async function fetchThread(
   message: IncomingSlackMessage,
   fetchReplies: FetchSlackReplies,
-): Promise<{ messages: SlackHistoryMessage[]; truncated: boolean }> {
+): Promise<ThreadSnapshot> {
   const threadTs = message.threadTs ?? message.ts;
-  const collected: SlackHistoryMessage[] = [];
+  const recent = new Map<string, SlackHistoryMessage>();
+  const seen = new Set<string>();
+  const seenCursors = new Set<string>();
+  let root: SlackHistoryMessage | undefined;
   let cursor: string | undefined;
-  let truncated = false;
 
   do {
-    const remaining = MAX_THREAD_MESSAGES - collected.length;
-    if (remaining <= 0) {
-      truncated = true;
-      break;
-    }
     const page = await fetchReplies({
       channel: message.channelId,
       ts: threadTs,
-      limit: Math.min(THREAD_PAGE_SIZE, remaining),
+      limit: THREAD_PAGE_SIZE,
+      latest: message.ts,
+      inclusive: true,
       ...(cursor ? { cursor } : {}),
     });
     if (!page.ok) {
       throw new Error(`Slack thread history request failed: ${page.error ?? "unknown_error"}`);
     }
-    collected.push(...(page.messages ?? []));
-    cursor = text(page.response_metadata?.next_cursor) || undefined;
+
+    for (const item of page.messages ?? []) {
+      const ts = text(item.ts);
+      if (!ts) continue;
+      if (ts === threadTs) root = item;
+      if (ts === message.ts || Number(ts) > Number(message.ts)) continue;
+      if (seen.has(ts)) {
+        if (recent.has(ts)) recent.set(ts, item);
+        continue;
+      }
+      seen.add(ts);
+      recent.set(ts, item);
+    }
+
+    const overflow = recent.size - MAX_THREAD_MESSAGES;
+    if (overflow > 0) {
+      const oldest = [...recent.values()]
+        .sort(compareMessages)
+        .slice(0, overflow);
+      for (const item of oldest) recent.delete(text(item.ts));
+    }
+
+    const nextCursor = text(page.response_metadata?.next_cursor) || undefined;
+    if (nextCursor && seenCursors.has(nextCursor)) {
+      throw new Error("Slack thread history returned a repeated cursor");
+    }
+    if (nextCursor) seenCursors.add(nextCursor);
+    cursor = nextCursor;
   } while (cursor);
 
-  return { messages: collected, truncated };
+  let messages = [...recent.values()].sort(compareMessages);
+  if (
+    root &&
+    threadTs !== message.ts &&
+    Number(threadTs) <= Number(message.ts) &&
+    !recent.has(threadTs)
+  ) {
+    messages = [
+      root,
+      ...messages.slice(-(MAX_THREAD_MESSAGES - 1)),
+    ].sort(compareMessages);
+  }
+
+  return {
+    ...(root ? { root } : {}),
+    messages,
+    omittedMessages: Math.max(0, seen.size - messages.length),
+  };
 }
 
 export async function addSlackThreadContext(
@@ -138,23 +195,16 @@ export async function addSlackThreadContext(
 ): Promise<string> {
   const threadTs = message.threadTs ?? message.ts;
   const result = await fetchThread(message, fetchReplies);
-  const unique = new Map<string, SlackHistoryMessage>();
-  for (const item of result.messages) {
-    const ts = text(item.ts);
-    if (ts) unique.set(ts, item);
-  }
-  const ordered = [...unique.values()].sort((left, right) =>
-    Number(text(left.ts)) - Number(text(right.ts)),
-  );
-  const root = ordered.find((item) => text(item.ts) === threadTs) ?? ordered[0];
-  let history = ordered
+  const root = result.root ?? result.messages[0];
+  let history = result.messages
     .filter((item) => {
       const ts = text(item.ts);
       return ts !== message.ts && Number(ts) <= Number(message.ts);
     })
     .map(toContext)
     .filter((item): item is ThreadMessageContext => Boolean(item));
-  let omittedMessages = result.truncated ? Math.max(1, ordered.length - history.length) : 0;
+  let omittedMessages =
+    result.omittedMessages + (result.messages.length - history.length);
 
   const payload = () => ({
     source: "slack_thread_history",
@@ -162,9 +212,7 @@ export async function addSlackThreadContext(
     threadTs,
     title: title(root, threadTs),
     messages: history,
-    ...(result.truncated || omittedMessages > 0
-      ? { truncated: true, omittedMessages }
-      : {}),
+    ...(omittedMessages > 0 ? { truncated: true, omittedMessages } : {}),
   });
   let serialized = JSON.stringify(payload(), null, 2);
   while (serialized.length > MAX_THREAD_CONTEXT_CHARS && history.length > 0) {

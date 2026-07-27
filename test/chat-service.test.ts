@@ -85,6 +85,18 @@ describe("ChatService", () => {
     registry.close();
   });
 
+  it("deduplicates a normal retry after a UI reply claimed the event", async () => {
+    const { service, prompt, registry } = setup();
+
+    expect(service.claimEvent("Ev01")).toBe(true);
+    await expect(service.handleMessage(message())).resolves.toEqual({
+      type: "duplicate",
+    });
+
+    expect(prompt).not.toHaveBeenCalled();
+    registry.close();
+  });
+
   it("fails closed for wrong users, apps, and unmentioned channels", async () => {
     const { service, prompt, registry } = setup();
     await expect(
@@ -163,7 +175,7 @@ describe("ChatService", () => {
     enabled.registry.close();
   });
 
-  it("marks a resumed Slack conversation when preparing its prompt", async () => {
+  it("treats a sessionless conversation record as new", async () => {
     const { service, registry } = setup();
     registry.createConversation(
       {
@@ -173,6 +185,28 @@ describe("ChatService", () => {
         threadTs: "123.456",
       },
       "U01",
+    );
+    const preparePrompt = vi.fn(async () => "recovered request");
+
+    await service.handleMessage(message(), { preparePrompt });
+
+    expect(preparePrompt).toHaveBeenCalledWith({ isNewConversation: true });
+    registry.close();
+  });
+
+  it("marks a persisted Slack conversation as resumed", async () => {
+    const { service, registry } = setup();
+    const conversationKey = {
+      teamId: "T01",
+      appId: "A01",
+      channelId: "D01",
+      threadTs: "123.456",
+    };
+    registry.createConversation(conversationKey, "U01");
+    registry.setSession(
+      conversationKey,
+      "/tmp/session.jsonl",
+      "session-01",
     );
     const preparePrompt = vi.fn(async () => "resumed request");
 
