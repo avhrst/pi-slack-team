@@ -229,7 +229,7 @@ The schema is strict: unknown keys and invalid IDs fail startup.
 | `maxFileBytes` | No | 20 MiB | Per-file download limit, maximum 100 MiB |
 | `maxFilesPerMessage` | No | `5` | Attachment count limit, maximum 10 |
 
-Use `progressMode: raw` only when everyone who can see the Slack thread may see tool arguments and output. Private model thinking is never sent to Slack.
+Use `progressMode: raw` only when everyone who can see the Slack thread may see tool arguments and output. Private model thinking is never sent to Slack. Progress updates are capped below Slack's recommended 4,000-character message size. If Slack rejects a detailed raw update, that turn immediately retries with compact summary progress and remains in summary mode; the final answer is still posted separately.
 
 ### `pi`
 

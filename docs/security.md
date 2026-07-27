@@ -11,7 +11,7 @@ The MVP therefore defaults to:
 - a required explicit Slack user allowlist for DMs, mentions, and manager observations;
 - one Slack app per Unix agent;
 - Slack progress defaults to visible assistant text and tool names only;
-- `progressMode: raw` is an explicit per-agent opt-in that exposes tool arguments and output in the authorized conversation;
+- `progressMode: raw` is an explicit per-agent opt-in that exposes bounded tool arguments and output in the authorized conversation, with an automatic summary fallback when Slack rejects a detailed update;
 - private model thinking is never sent to Slack in either progress mode;
 - ordinary bot-authored channel messages are ignored; only versioned correlated envelopes from exact reciprocal `interAgent.peers` are accepted, and worker responses resolve a pending tool without recursively prompting the manager;
 - ambient manager turns publish no working/progress message and produce no Slack output when the agent selects the silent decision;

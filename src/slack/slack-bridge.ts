@@ -9,7 +9,6 @@ import {
 } from "../inter-agent/protocol.js";
 import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
-import type { RpcRecord } from "../pi/rpc-client.js";
 import type { PiUiRequestContext } from "../pi/session-pool.js";
 import {
   conversationKey,
@@ -27,13 +26,12 @@ import {
   managerObservationPrompt,
   managerVisibleResponse,
 } from "./manager-mode.js";
-import { PiProgressTranscript, toSlackMrkdwn } from "./pi-progress.js";
+import { toSlackMrkdwn } from "./pi-progress.js";
+import { SlackProgressReporter } from "./progress-reporter.js";
 import { SlackUiBroker } from "./slack-ui.js";
 import { addSlackThreadContext } from "./thread-context.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
-const SLACK_PROGRESS_INTERVAL_MS = 1_000;
-
 function chunks(text: string): string[] {
   if (text.length <= SLACK_CHUNK_LIMIT) return [text];
   const result: string[] = [];
@@ -41,79 +39,6 @@ function chunks(text: string): string[] {
     result.push(text.slice(offset, offset + SLACK_CHUNK_LIMIT));
   }
   return result;
-}
-
-class SlackProgressReporter {
-  readonly #transcript: PiProgressTranscript;
-  readonly #update: (text: string) => Promise<void>;
-  readonly #onError: (error: unknown) => void;
-  #updates: Promise<void> = Promise.resolve();
-  #timer: NodeJS.Timeout | undefined;
-  #lastUpdateAt = 0;
-  #pending = false;
-  #closed = false;
-
-  constructor(
-    mode: AgentConfig["slack"]["progressMode"],
-    update: (text: string) => Promise<void>,
-    onError: (error: unknown) => void,
-  ) {
-    this.#transcript = new PiProgressTranscript(mode);
-    this.#update = update;
-    this.#onError = onError;
-  }
-
-  record(event: RpcRecord): void {
-    if (this.#closed || !this.#transcript.record(event)) return;
-    this.#pending = true;
-    this.#schedule();
-  }
-
-  async complete(finalText: string): Promise<void> {
-    this.#closed = true;
-    if (this.#timer) clearTimeout(this.#timer);
-    this.#timer = undefined;
-    this.#pending = false;
-    await this.#updates;
-    await this.#runUpdate(this.#transcript.render("completed", finalText));
-  }
-
-  async close(): Promise<void> {
-    this.#closed = true;
-    if (this.#timer) clearTimeout(this.#timer);
-    this.#timer = undefined;
-    this.#pending = false;
-    await this.#updates;
-  }
-
-  #schedule(): void {
-    if (this.#timer || this.#closed) return;
-    const delay = Math.max(
-      0,
-      SLACK_PROGRESS_INTERVAL_MS - (Date.now() - this.#lastUpdateAt),
-    );
-    this.#timer = setTimeout(() => {
-      this.#timer = undefined;
-      this.#flush();
-    }, delay);
-    this.#timer.unref();
-  }
-
-  #flush(): void {
-    if (!this.#pending || this.#closed) return;
-    this.#pending = false;
-    this.#lastUpdateAt = Date.now();
-    this.#updates = this.#runUpdate(this.#transcript.render("working"));
-  }
-
-  async #runUpdate(text: string): Promise<void> {
-    const update = this.#updates.then(() => this.#update(text));
-    const handled = update.catch((error: unknown) => {
-      this.#onError(error);
-    });
-    this.#updates = handled;
-    await handled;
-  }
 }
 
 export class SlackBridge {
@@ -290,10 +215,12 @@ export class SlackBridge {
           text,
         });
       },
-      (error) => {
+      (error, updateAttempt) => {
         this.#logger.warn("slack_progress_update_failed", {
           agentId: this.#config.agentId,
           eventId: message.eventId,
+          progressMode: this.#config.slack.progressMode,
+          updateAttempt,
           error,
         });
       },

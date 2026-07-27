@@ -1,7 +1,9 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
 
-const MAX_TRANSCRIPT_CHARS = 35_000;
-const MAX_TOOL_SECTION_CHARS = 12_000;
+// Slack recommends keeping top-level message text below 4,000 characters.
+// Final answers are chunked separately; progress updates favor reliability.
+const MAX_TRANSCRIPT_CHARS = 3_500;
+const MAX_TOOL_SECTION_CHARS = 1_200;
 const MAX_ENTRIES = 100;
 
 export type ProgressMode = "summary" | "raw";

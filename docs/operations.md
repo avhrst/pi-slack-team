@@ -76,4 +76,6 @@ Demoting a manager to worker takes effect at the runtime authorization layer imm
 
 The runtime acknowledges Slack delivery before starting Pi work and records the event ID before prompt submission. A duplicate Slack event is ignored. Manager apps ignore ordinary bot-authored events and route explicit mentions through the mention listener so one Slack message cannot execute both an ambient and explicit turn. A valid correlated worker response is consumed before UI or chat routing and resolves only its matching pending delegation.
 
+Progress updates are bounded independently from final responses. If Slack rejects a `progressMode: raw` update, the current turn retries immediately with compact summary progress and stays in summary mode. A `slack_progress_update_failed` warning records `updateAttempt: configured`; `updateAttempt: summary-fallback` means Slack also rejected the fallback and may indicate a broader Slack API incident. Progress failure never suppresses the separately posted final answer.
+
 On shutdown, the worker stops accepting new events, lets bounded cleanup run, terminates child Pi processes, and closes SQLite. A manager also closes its private delegation socket and rejects pending waits. Persistent Pi session files remain available for the next start.

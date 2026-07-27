@@ -192,7 +192,7 @@ describe("PiProgressTranscript", () => {
     );
 
     const rendered = transcript.render("working");
-    expect(rendered.length).toBeLessThanOrEqual(35_000);
+    expect(rendered.length).toBeLessThanOrEqual(3_500);
     expect(rendered).toContain("Pi is working");
   });
 });
