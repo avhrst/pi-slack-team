@@ -78,4 +78,6 @@ The runtime acknowledges Slack delivery before starting Pi work and records the 
 
 Progress updates are bounded independently from final responses. If Slack rejects a `progressMode: raw` update, the current turn retries immediately with compact summary progress and stays in summary mode. A `slack_progress_update_failed` warning records `updateAttempt: configured`; `updateAttempt: summary-fallback` means Slack also rejected the fallback and may indicate a broader Slack API incident. Progress failure never suppresses the separately posted final answer.
 
+An automatic Pi selection logs `pi_ui_auto_selected` with its zero-based configuration rule index, but not the title or option text. Treat changes to `pi.autoSelect` as production authorization changes: validate the exact extension strings, restart only while conversations are idle, and canary both a matching selection and an unmatched cancellation.
+
 On shutdown, the worker stops accepting new events, lets bounded cleanup run, terminates child Pi processes, and closes SQLite. A manager also closes its private delegation socket and rejects pending waits. Persistent Pi session files remain available for the next start.

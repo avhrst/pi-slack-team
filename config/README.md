@@ -11,6 +11,8 @@ The configuration schema is strict. `worker` is the default role, but public exa
 
 Production credentials are normally loaded from systemd's `$CREDENTIALS_DIRECTORY`. The optional `credentials` YAML block is for local development with owner-readable absolute files only.
 
+`pi.autoSelect` is an optional exact-match standing authorization for Pi RPC `select` dialogs. It never uses regexes or defaults, and the configured option must be present in the extension request. Keep it empty unless a dedicated agent has a narrowly reviewed unattended workflow; unmatched delegated dialogs still fail closed.
+
 Other files in this directory illustrate specialized settings such as bounded file uploads and the reciprocal `dev`/`deploy`/`msboard`/`support` peer layout. They contain synthetic IDs and no credentials.
 
 See the [configuration reference](../README.md#configuration-reference), [role contract](../docs/roles.md), and [Slack setup guide](../docs/slack-setup.md).

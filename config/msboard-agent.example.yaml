@@ -31,6 +31,9 @@ pi:
   maxActiveSessions: 1
   idleTimeoutMs: 300000
   requestTimeoutMs: 30000
+  # A dedicated existing-app deployment agent may use exact `autoSelect` rules
+  # for the extension's import and update-existing choices. Keep them disabled
+  # unless that unattended production action is explicitly authorized.
 
 # Production credentials are loaded from systemd:
 #   $CREDENTIALS_DIRECTORY/slack_bot_token

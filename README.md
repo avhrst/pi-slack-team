@@ -242,6 +242,9 @@ Use `progressMode: raw` only when everyone who can see the Slack thread may see 
 | `maxActiveSessions` | No | `1` | Concurrent Pi turns for this runtime, maximum 32 |
 | `idleTimeoutMs` | No | `300000` | Stop an idle Pi subprocess while retaining its session |
 | `requestTimeoutMs` | No | `30000` | Pi RPC request timeout |
+| `autoSelect` | No | `[]` | Exact Pi UI select title/option standing authorizations, maximum 16 |
+
+Each `autoSelect` rule must match the complete dialog title and an option present in that request. Rules never match confirms, prefixes, or regular expressions. A match is answered before delegated-dialog cancellation, so treat every rule as pre-authorized execution under that Unix agent and keep the list narrowly scoped.
 
 ### `interAgent`
 
@@ -333,7 +336,7 @@ Core controls:
 - bounded thread context, files, concurrency, and RPC operations;
 - credentials outside Git, YAML, SQLite, and command-line arguments;
 - safe progress mode by default;
-- owner-bound interactive confirmations.
+- owner-bound interactive confirmations and exact, explicitly configured automatic select rules.
 
 Read [SECURITY.md](SECURITY.md) before publishing changes or reporting a vulnerability.
 

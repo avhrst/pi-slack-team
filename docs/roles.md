@@ -80,7 +80,7 @@ A configured manager Pi session for a shared channel thread receives `delegate_t
 
 The worker uses its normal per-thread persistent Pi session and its own Unix identity, tools, credentials, working directory, and instructions. Its response explicitly mentions the manager with the same correlation ID. The manager runtime consumes response chunks directly into the waiting tool call instead of creating another manager Pi turn, which prevents recursive agent loops. A worker-side error is returned as a failed tool call.
 
-Interactive Pi dialogs are cancelled during a delegated turn. A worker that requires human approval must report that blocker rather than treating the manager bot as a human approver. Ordinary bot text, malformed envelopes, unconfigured apps, wrong-role peers, files, DMs, and orphaned responses remain fail-closed.
+Interactive Pi dialogs are cancelled during a delegated turn unless an exact `pi.autoSelect` title/option rule is configured on the worker. Such a rule is a standing authorization executed by the worker runtime, not approval transferred from the manager bot. Unmatched dialogs must be reported as blockers. Ordinary bot text, malformed envelopes, unconfigured apps, wrong-role peers, files, DMs, and orphaned responses remain fail-closed.
 
 `allowedUserIds` continues to authorize humans only. `interAgent.peers` is a separate transitive trust decision: configure a manager only when its policy is permitted to invoke that worker's capabilities.
 

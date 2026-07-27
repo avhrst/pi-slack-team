@@ -132,7 +132,7 @@ Exit: each bot routes exclusively to its Unix agent and one failed worker does n
 9. Two mutating chats cannot operate on the same cwd concurrently.
 10. A single worker failure leaves all other agent bots healthy.
 11. A configured manager can delegate one task to a worker in the same channel thread and receive the result in its current Pi turn.
-12. Unconfigured bots, wrong app/bot-user pairs, malformed/orphaned envelopes, DM delegation, and bot approval attempts fail closed.
+12. Unconfigured bots, wrong app/bot-user pairs, malformed/orphaned envelopes, DM delegation, and bot approval attempts fail closed; only exact worker-side `pi.autoSelect` standing authorizations may answer delegated select dialogs.
 
 ## Deferred work
 

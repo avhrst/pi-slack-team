@@ -10,6 +10,7 @@ import {
 import type { Logger } from "../observability/logger.js";
 import type { ChatService } from "../routing/chat-service.js";
 import type { PiUiRequestContext } from "../pi/session-pool.js";
+import { matchAutomaticSelect } from "../pi/ui-policy.js";
 import {
   conversationKey,
   serializeConversationKey,
@@ -106,6 +107,19 @@ export class SlackBridge {
   async handlePiUiRequest(
     context: PiUiRequestContext,
   ): Promise<Record<string, unknown>> {
+    if (context.signal.aborted) return { cancelled: true };
+    const automaticSelect = matchAutomaticSelect(
+      this.#config.pi.autoSelect,
+      context.request,
+    );
+    if (automaticSelect) {
+      this.#logger.info("pi_ui_auto_selected", {
+        agentId: this.#config.agentId,
+        ruleIndex: automaticSelect.ruleIndex,
+      });
+      return automaticSelect.response;
+    }
+
     const key = serializeConversationKey(context.conversation);
     if (
       this.#delegatedTurns.has(key) ||

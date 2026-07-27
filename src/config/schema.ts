@@ -10,6 +10,31 @@ const slackId = (prefix: string) =>
     .string()
     .regex(new RegExp(`^${prefix}[A-Z0-9]+$`), `must start with ${prefix}`);
 
+const autoSelectRuleSchema = z
+  .object({
+    title: z.string().min(1).max(500),
+    option: z.string().min(1).max(1_000),
+  })
+  .strict();
+
+const autoSelectSchema = z
+  .array(autoSelectRuleSchema)
+  .max(16)
+  .superRefine((rules, context) => {
+    const titles = new Set<string>();
+    for (const [index, rule] of rules.entries()) {
+      if (titles.has(rule.title)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "title"],
+          message: "automatic select titles must be unique",
+        });
+      }
+      titles.add(rule.title);
+    }
+  })
+  .default([]);
+
 const interAgentPeerSchema = z
   .object({
     agentId: z.string().regex(/^[a-z][a-z0-9-]{1,62}$/),
@@ -51,6 +76,7 @@ export const agentConfigSchema = z
         maxActiveSessions: z.number().int().min(1).max(32).default(1),
         idleTimeoutMs: z.number().int().min(10_000).max(86_400_000).default(300_000),
         requestTimeoutMs: z.number().int().min(1_000).max(300_000).default(30_000),
+        autoSelect: autoSelectSchema,
       })
       .strict(),
     interAgent: z

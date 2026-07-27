@@ -222,7 +222,7 @@ Complete both role checklists, then:
 - The manager lists `delegate_to_worker` in its Pi tools and can delegate a harmless read-only task.
 - The worker request and response stay in the originating thread, and the response returns to the current manager turn.
 - A malformed marker, unconfigured bot, ordinary bot message, attachment, and DM delegation fail closed.
-- A worker confirmation request is cancelled and reported as a blocker rather than approved by a bot.
+- An unmatched worker confirmation/select request is cancelled and reported as a blocker rather than approved by a bot; any configured `pi.autoSelect` rule matches only its exact select title and option.
 
 ## Troubleshooting
 

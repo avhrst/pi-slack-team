@@ -53,6 +53,7 @@ describe("agent config", () => {
     expect(config.pi.command).toBe("/usr/bin/pi");
     expect(config.pi.maxActiveSessions).toBe(1);
     expect(config.pi.idleTimeoutMs).toBe(300_000);
+    expect(config.pi.autoSelect).toEqual([]);
   });
 
   it("accepts explicit role and raw progress output", () => {
@@ -62,6 +63,35 @@ describe("agent config", () => {
     const config = agentConfigSchema.parse(input);
     expect(config.role).toBe("manager");
     expect(config.slack.progressMode).toBe("raw");
+  });
+
+  it("accepts exact automatic selections and rejects ambiguous titles", () => {
+    const input = structuredClone(validConfig());
+    const config = agentConfigSchema.parse({
+      ...input,
+      pi: {
+        ...input.pi,
+        autoSelect: [
+          { title: "Choose deployment mode:", option: "Update existing" },
+        ],
+      },
+    });
+    expect(config.pi.autoSelect).toEqual([
+      { title: "Choose deployment mode:", option: "Update existing" },
+    ]);
+
+    expect(() =>
+      agentConfigSchema.parse({
+        ...input,
+        pi: {
+          ...input.pi,
+          autoSelect: [
+            { title: "Duplicate", option: "First" },
+            { title: "Duplicate", option: "Second" },
+          ],
+        },
+      }),
+    ).toThrow("automatic select titles must be unique");
   });
 
   it("validates role-specific inter-agent peers and applies safe limits", () => {

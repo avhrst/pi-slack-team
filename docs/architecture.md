@@ -33,7 +33,7 @@ manager runtime ── explicit correlated @mention ──► worker Slack app/r
 
 Slack remains the cross-Unix-account transport, so no shared root broker, agent credential, filesystem, or session store is introduced. Both apps must be members of the channel. Requests and responses authenticate the Slack event identity against reciprocal peer configuration. The manager consumes a matching worker response into the pending tool call and does not prompt its LLM again for that bot event. This synchronous correlation boundary prevents unbounded bot-to-bot reply loops.
 
-A worker runs delegated work under its existing isolated account and per-thread session. Interactive dialogs are cancelled for delegated turns; approval cannot be transferred to a bot. In-flight manager waits are memory-only and fail on timeout, cancellation, or runtime shutdown. Slack still retains the visible request/result, while the worker session remains persistent.
+A worker runs delegated work under its existing isolated account and per-thread session. Interactive dialogs are cancelled for delegated turns unless the worker runtime has an exact `pi.autoSelect` standing authorization for that select title and option; this local policy is not approval transferred to a bot. In-flight manager waits are memory-only and fail on timeout, cancellation, or runtime shutdown. Slack still retains the visible request/result, while the worker session remains persistent.
 
 ## Identity boundary
 

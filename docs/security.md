@@ -51,4 +51,4 @@ Pi confirmation and selection requests are bound to:
 - opaque one-time request ID;
 - expiration time.
 
-Late, duplicate, or cross-user actions fail closed. Dialogs raised while processing an inter-agent delegation are cancelled automatically; a bot cannot approve a worker's confirmation request.
+Late, duplicate, or cross-user actions fail closed. Dialogs raised while processing an inter-agent delegation are cancelled automatically unless an exact worker-side `pi.autoSelect` rule matches a select title and an option actually present in the request. Automatic selections do not support confirms, regexes, prefixes, or absent options. They are standing authorizations under the worker account—not bot approvals—and must be reviewed like any unattended production permission.

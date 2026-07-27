@@ -27,6 +27,11 @@ pi:
   sessionDir: /home/support-agent/.pi/agent/sessions
   maxActiveSessions: 1
   idleTimeoutMs: 300000
+  # Exact automatic selections are standing authorizations. Leave empty unless
+  # the agent has a narrowly reviewed non-interactive workflow.
+  # autoSelect:
+  #   - title: "Exact extension select title:"
+  #     option: "Exact authorized option"
 
 # Production credentials are loaded from systemd:
 #   $CREDENTIALS_DIRECTORY/slack_bot_token

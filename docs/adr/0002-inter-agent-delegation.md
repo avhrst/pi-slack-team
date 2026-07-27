@@ -21,7 +21,7 @@ Both runtimes configure reciprocal opposite-role peers. An inter-agent event is 
 
 The manager registers the pending correlation before posting. Matching response chunks resolve the existing `delegate_to_worker` call and do not allocate another manager Pi turn. This breaks automatic bot-to-bot reply chains. Ordinary bot messages remain rejected.
 
-Worker Pi dialogs are cancelled for delegated turns. A manager bot cannot approve an interactive confirmation; the worker must return the approval requirement as a blocker.
+Worker Pi dialogs are cancelled for delegated turns by default. A manager bot cannot approve an interactive confirmation. An exact worker-side `pi.autoSelect` rule may answer a matching select as a pre-reviewed standing authorization; all unmatched dialogs remain blockers.
 
 ## Consequences
 
