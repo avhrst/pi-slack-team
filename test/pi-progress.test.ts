@@ -138,6 +138,93 @@ describe("PiProgressTranscript", () => {
     expect(completed).not.toContain("partial output");
   });
 
+  it("renders validated deployment markers without exposing partial tool output", () => {
+    const transcript = new PiProgressTranscript("summary");
+    const first = {
+      version: 1,
+      stage: "apex",
+      state: "running",
+      planned: 50,
+      completed: 10,
+      pending: 40,
+      ok: 10,
+      warn: 0,
+      fail: 0,
+      skip: 0,
+      current: "CHERNOVTSI",
+      updatedAtUtc: "2026-08-05T14:00:00+00:00",
+    };
+    expect(
+      transcript.record(
+        event("tool_execution_update", {
+          toolCallId: "call-1",
+          toolName: "bash",
+          partialResult: {
+            content: [{
+              type: "text",
+              text: `raw password output\nPI_DEPLOY_PROGRESS ${JSON.stringify(first)}\nmore raw output`,
+            }],
+          },
+        }),
+      ),
+    ).toBe(true);
+
+    const rendered = transcript.render("working");
+    expect(rendered).toContain("*APEX:* 10/50");
+    expect(rendered).toContain("OK 10");
+    expect(rendered).toContain("current `CHERNOVTSI`");
+    expect(rendered).not.toContain("password");
+    expect(rendered).not.toContain("raw output");
+    expect(rendered).not.toContain("updatedAtUtc");
+
+    const invalid = { ...first, current: "unsafe value with spaces" };
+    expect(
+      transcript.record(
+        event("tool_execution_update", {
+          partialResult: {
+            content: [{
+              type: "text",
+              text: `PI_DEPLOY_PROGRESS ${JSON.stringify(invalid)}`,
+            }],
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("replaces deployment status with the newest valid marker", () => {
+    const transcript = new PiProgressTranscript("summary");
+    const progress = (completed: number, current: string | null) => ({
+      version: 1,
+      stage: "sql-files",
+      state: completed === 3 ? "completed" : "running",
+      planned: 3,
+      completed,
+      pending: 3 - completed,
+      ok: completed,
+      warn: 0,
+      fail: 0,
+      skip: 0,
+      current,
+    });
+    for (const payload of [progress(1, "TT1"), progress(3, null)]) {
+      transcript.record(
+        event("tool_execution_update", {
+          partialResult: {
+            content: [{
+              type: "text",
+              text: `PI_DEPLOY_PROGRESS ${JSON.stringify(payload)}`,
+            }],
+          },
+        }),
+      );
+    }
+    const rendered = transcript.render("working");
+    expect(rendered).toContain("*SQL file:* 3/3");
+    expect(rendered).not.toContain("1/3");
+    expect(rendered).not.toContain("current");
+  });
+
   it("renders file arguments as compact labeled fields", () => {
     const transcript = new PiProgressTranscript("raw");
     transcript.record(

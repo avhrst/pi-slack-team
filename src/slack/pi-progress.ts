@@ -5,6 +5,7 @@ import type { RpcRecord } from "../pi/rpc-client.js";
 const MAX_TRANSCRIPT_CHARS = 3_500;
 const MAX_TOOL_SECTION_CHARS = 1_200;
 const MAX_ENTRIES = 100;
+const DEPLOY_STORE_RE = /^[A-Z0-9_]{1,32}$/u;
 
 export type ProgressMode = "summary" | "raw";
 export type ProgressState = "working" | "completed";
@@ -68,6 +69,60 @@ function resultText(value: unknown): string {
     if (text) return text;
   }
   return jsonText(value);
+}
+
+function safeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function deploymentProgress(value: unknown): string | undefined {
+  const text = resultText(value);
+  const markers = [...text.matchAll(/PI_DEPLOY_PROGRESS (\{[^\r\n]{1,1200}\})/gu)];
+  const encoded = markers.at(-1)?.[1];
+  if (!encoded) return undefined;
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = asRecord(JSON.parse(encoded)) ?? {};
+  } catch {
+    return undefined;
+  }
+  const stage = payload.stage;
+  const state = payload.state;
+  const planned = safeInteger(payload.planned);
+  const completed = safeInteger(payload.completed);
+  const pending = safeInteger(payload.pending);
+  const ok = safeInteger(payload.ok);
+  const warn = safeInteger(payload.warn);
+  const fail = safeInteger(payload.fail);
+  const skip = safeInteger(payload.skip);
+  const current = payload.current;
+  if (
+    payload.version !== 1 ||
+    !["apex", "sql-files"].includes(String(stage)) ||
+    !["running", "completed"].includes(String(state)) ||
+    planned === undefined ||
+    completed === undefined ||
+    pending === undefined ||
+    ok === undefined ||
+    warn === undefined ||
+    fail === undefined ||
+    skip === undefined ||
+    completed > planned ||
+    pending !== planned - completed ||
+    ok + warn + fail + skip !== completed ||
+    !(current === null || current === undefined ||
+      (typeof current === "string" && DEPLOY_STORE_RE.test(current)))
+  ) {
+    return undefined;
+  }
+
+  const label = stage === "apex" ? "APEX" : "SQL file";
+  const icon = state === "completed" ? ":white_check_mark:" : ":rocket:";
+  const currentText = typeof current === "string" ? ` • current ${inlineCode(current)}` : "";
+  return `${icon} *${label}:* ${completed}/${planned} • OK ${ok} • WARN ${warn} • FAIL ${fail} • SKIP ${skip}${currentText}`;
 }
 
 function inlineCode(value: string): string {
@@ -149,6 +204,7 @@ export class PiProgressTranscript {
   readonly #rawTools = new Map<string, RawToolEntry>();
   #anonymousToolSequence = 0;
   #textBoundary = false;
+  #deploymentStatus: string | undefined;
 
   constructor(mode: ProgressMode = "summary") {
     this.#mode = mode;
@@ -187,7 +243,12 @@ export class PiProgressTranscript {
     }
 
     if (event.type === "tool_execution_update") {
-      if (this.#mode !== "raw") return false;
+      if (this.#mode !== "raw") {
+        const status = deploymentProgress(event.partialResult);
+        if (!status || status === this.#deploymentStatus) return false;
+        this.#deploymentStatus = status;
+        return true;
+      }
       const tool = this.#rawTool(event);
       tool.result = event.partialResult;
       tool.state = "running";
@@ -206,6 +267,9 @@ export class PiProgressTranscript {
         const tool = this.#rawTool(event);
         tool.result = event.result;
         tool.state = event.isError === true ? "failed" : "completed";
+      } else {
+        this.#deploymentStatus =
+          deploymentProgress(event.result) ?? this.#deploymentStatus;
       }
       return true;
     }
@@ -247,7 +311,7 @@ export class PiProgressTranscript {
       .join("\n\n")
       .trim();
     const tools = this.#mode === "summary" ? this.#renderToolSummary(state) : "";
-    const body = [transcript, tools].filter(Boolean).join("\n\n");
+    const body = [transcript, this.#deploymentStatus, tools].filter(Boolean).join("\n\n");
     if (!body) return heading;
 
     const available = MAX_TRANSCRIPT_CHARS - heading.length - 2;
