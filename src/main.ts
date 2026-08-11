@@ -40,14 +40,6 @@ async function start(configPath: string): Promise<void> {
       : { cancelled: true },
   );
   const chatService = new ChatService(config, registry, pool, logger);
-  const bridge = new SlackBridge(
-    config,
-    credentials,
-    chatService,
-    interAgent,
-    logger,
-  );
-  slackReference.bridge = bridge;
   let stopping = false;
 
   const shutdown = async (signal: string) => {
@@ -59,6 +51,25 @@ async function start(configPath: string): Promise<void> {
     await pool.shutdown();
     registry.close();
   };
+
+  const failRuntime = (error: Error) => {
+    if (stopping) return;
+    logger.error("runtime_connection_failure", {
+      agentId: config.agentId,
+      error,
+    });
+    void shutdown("slack_connection_failure").finally(() => process.exit(1));
+  };
+
+  const bridge = new SlackBridge(
+    config,
+    credentials,
+    chatService,
+    interAgent,
+    logger,
+    failRuntime,
+  );
+  slackReference.bridge = bridge;
 
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));

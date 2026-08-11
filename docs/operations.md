@@ -82,4 +82,6 @@ Summary mode ignores ordinary partial tool output. A long deployment can opt in 
 
 An automatic Pi selection logs `pi_ui_auto_selected` with its zero-based configuration rule index, but not the title or option text. Treat changes to `pi.autoSelect` as production authorization changes: validate the exact extension strings, restart only while conversations are idle, and canary both a matching selection and an unmatched cancellation.
 
+The Socket Mode client automatically reconnects after ordinary Slack connection rotation. The runtime logs `slack_connection_lost` and allows a two-minute recovery window; a successful reconnect logs `slack_connection_restored`. If recovery does not complete, `slack_connection_unhealthy` is followed by a clean exit with status `1`, allowing the systemd unit's `Restart=on-failure` policy to replace a half-alive process.
+
 On shutdown, the worker stops accepting new events, lets bounded cleanup run, terminates child Pi processes, and closes SQLite. A manager also closes its private delegation socket and rejects pending waits. Persistent Pi session files remain available for the next start.

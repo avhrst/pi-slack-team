@@ -1,4 +1,4 @@
-import { App, LogLevel } from "@slack/bolt";
+import { App, LogLevel, SocketModeReceiver } from "@slack/bolt";
 import type { AgentConfig } from "../config/schema.js";
 import type { SlackCredentials } from "../config/load-config.js";
 import type { InterAgentGateway } from "../inter-agent/gateway.js";
@@ -16,6 +16,7 @@ import {
   serializeConversationKey,
   type IncomingSlackMessage,
 } from "../routing/chat-key.js";
+import { SlackConnectionMonitor } from "./connection-monitor.js";
 import { downloadSlackFiles } from "./file-download.js";
 import {
   parseAppMentionEvent,
@@ -48,6 +49,7 @@ export class SlackBridge {
   readonly #interAgent: InterAgentGateway;
   readonly #logger: Logger;
   readonly #app: App;
+  readonly #connectionMonitor: SlackConnectionMonitor;
   readonly #botToken: string;
   readonly #uiBroker = new SlackUiBroker();
   readonly #delegatedTurns = new Map<string, number>();
@@ -59,18 +61,31 @@ export class SlackBridge {
     chatService: ChatService,
     interAgent: InterAgentGateway,
     logger: Logger,
+    onConnectionFailure: (error: Error) => void,
   ) {
     this.#config = config;
     this.#chatService = chatService;
     this.#interAgent = interAgent;
     this.#botToken = credentials.botToken;
     this.#logger = logger;
-    this.#app = new App({
-      token: credentials.botToken,
+    const receiver = new SocketModeReceiver({
       appToken: credentials.appToken,
-      socketMode: true,
+      autoReconnectEnabled: true,
+      clientPingTimeout: 5_000,
+      serverPingTimeout: 30_000,
       logLevel: LogLevel.ERROR,
     });
+    this.#app = new App({
+      token: credentials.botToken,
+      receiver,
+      logLevel: LogLevel.ERROR,
+    });
+    this.#connectionMonitor = new SlackConnectionMonitor(
+      receiver.client,
+      config.agentId,
+      logger,
+      onConnectionFailure,
+    );
     this.#interAgent.setSlackSender(async (message) => {
       await this.#app.client.chat.postMessage({
         channel: message.channelId,
@@ -90,7 +105,13 @@ export class SlackBridge {
       throw new Error("Slack auth response did not include a bot user ID");
     }
     this.#botUserId = identity.user_id;
-    await this.#app.start();
+    this.#connectionMonitor.start();
+    try {
+      await this.#app.start();
+    } catch (error) {
+      this.#connectionMonitor.stop();
+      throw error;
+    }
     this.#logger.info("slack_connected", {
       agentId: this.#config.agentId,
       role: this.#config.role,
@@ -100,6 +121,7 @@ export class SlackBridge {
   }
 
   async stop(): Promise<void> {
+    this.#connectionMonitor.stop();
     this.#uiBroker.cancelAll();
     await this.#app.stop();
   }
