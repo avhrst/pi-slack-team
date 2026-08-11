@@ -33,7 +33,8 @@ pi:
   cwd: /home/pi-worker
   agentDir: /home/pi-worker/.pi/agent
   sessionDir: /home/pi-worker/.pi/agent/sessions
-  maxActiveSessions: 1
+  maxConcurrentTurns: 4
+  maxResidentProcesses: 8
   idleTimeoutMs: 300000
   requestTimeoutMs: 30000
 

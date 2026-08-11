@@ -54,7 +54,9 @@ The durable Slack conversation key is:
 (team_id, app_id, channel_id, thread_ts)
 ```
 
-For a root message without `thread_ts`, its own `ts` becomes the thread root. The first qualifying human normally owns the conversation. When a configured manager delegation creates a worker session, that exact manager bot is only a provisional owner: once the turn is idle, the first allowed human explicit mention may atomically claim it. Workers reject later human takeover attempts, while configured manager delegations may continue the human-owned session. Managers allow other authorized humans to contribute channel turns to the same session while retaining the durable owner for interactive Pi confirmations.
+Slack conversation identity is intentionally separate from Pi session identity. Direct messages use `(team_id, app_id, user_id)`, so every human has an isolated Pi session per agent and new top-level DMs from that human resume it. Public/private channels use `(team_id, app_id, channel_id, thread_ts)`, so each channel thread remains isolated even when the same human starts several threads.
+
+For a root message without `thread_ts`, its own `ts` becomes the Slack thread root. The first qualifying human normally owns the conversation. When a configured manager delegation creates a worker session, that exact manager bot is only a provisional owner: once the turn is idle, the first allowed human explicit mention may atomically claim it. Workers reject later human takeover attempts, while configured manager delegations may continue the human-owned session. Managers allow other authorized humans to contribute channel turns to the same session while retaining the durable owner for interactive Pi confirmations.
 
 When that first qualifying message creates a Pi session, the worker scans Slack thread history up to the triggering message and injects a bounded snapshot containing the root plus the most recent prior replies. The root message supplies the derived thread title. Prior messages, authors, timestamps, and file metadata are injected as explicitly untrusted user context; the triggering request is kept separate. Resumed Pi sessions do not receive the full transcript again.
 
@@ -62,11 +64,12 @@ When that first qualifying message creates a Pi session, the worker scans Slack 
 
 - One long-lived Slack runtime worker per agent, independent of the configured agent role.
 - Zero or more active Pi RPC subprocesses inside the worker's systemd cgroup.
-- One Pi process per active Slack conversation.
+- One Pi process per active logical Pi session: direct user or channel thread.
 - One private local delegation gateway only for a manager with worker peers.
-- Persistent Pi session file survives process hibernation.
-- Per-conversation queue serializes input.
-- A global semaphore limits simultaneous active turns.
+- Persistent Pi session files survive process hibernation and runtime restarts; OS process IDs do not.
+- Per-session queues serialize messages targeting the same Pi process.
+- A global semaphore limits simultaneous turns from different sessions.
+- A resident-process limit hibernates the least-recent idle process before allocating another.
 
 ## Storage
 

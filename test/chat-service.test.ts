@@ -457,6 +457,27 @@ describe("ChatService", () => {
     registry.close();
   });
 
+  it("resumes a direct-user session from a different DM root", async () => {
+    const { service, registry } = setup();
+    const firstRoot = {
+      teamId: "T01",
+      appId: "A01",
+      channelId: "D01",
+      threadTs: "111.000",
+    };
+    registry.createConversation(firstRoot, "U01");
+    registry.setSession(firstRoot, "/tmp/direct.jsonl", "direct-session");
+    const preparePrompt = vi.fn(async () => "continued request");
+
+    await service.handleMessage(
+      message({ eventId: "Ev02", ts: "222.000" }),
+      { preparePrompt },
+    );
+
+    expect(preparePrompt).toHaveBeenCalledWith({ isNewConversation: false });
+    registry.close();
+  });
+
   it("marks a persisted Slack conversation as resumed", async () => {
     const { service, registry } = setup();
     const conversationKey = {

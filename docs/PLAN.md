@@ -19,7 +19,7 @@ pi-slack-team@<agent>.service (User=<agent>)
     |
     +-- Slack adapter
     +-- authorization and event deduplication
-    +-- Slack thread -> Pi session registry
+    +-- DM user / channel thread -> Pi session registry
     +-- per-user SQLite state
     |
     +-- active chat A -> Pi RPC -> session A.jsonl
@@ -36,7 +36,7 @@ There is no root message broker and no shared Slack app token. Each worker inher
 4. For `role: worker`, later channel turns must explicitly mention the agent.
 5. For `role: manager`, authorized human `message.channels` and `message.groups` events also resume or create the thread session; the agent decides whether to act/respond or remain silent.
 6. A configured manager may call `delegate_to_worker` only from a shared channel thread; the worker response resolves that pending tool call without a second manager Pi turn.
-7. A different Slack thread creates a different Pi session.
+7. A different channel thread creates a different Pi session; top-level DMs from the same user resume that user's agent session.
 8. Mapping survives runtime worker and Pi subprocess restarts; an in-flight delegation wait intentionally does not.
 9. Active same-thread inputs are queued deterministically; explicit steering is a separate action.
 10. Idle Pi processes may stop while their session files remain resumable.
@@ -79,7 +79,7 @@ Exit: mock and real Pi RPC processes pass protocol contract tests.
 ### 4. Persistent session routing
 
 - SQLite conversation registry
-- Slack thread -> Pi session file mapping
+- DM user / channel thread -> Pi session file mapping
 - per-thread serialization
 - configurable global concurrency
 - idle hibernation and resume

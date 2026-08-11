@@ -33,8 +33,9 @@ pi:
   cwd: /home/pi-manager
   agentDir: /home/pi-manager/.pi/agent
   sessionDir: /home/pi-manager/.pi/agent/sessions
-  # Managers may receive many events; start with serialized turns.
-  maxActiveSessions: 1
+  # Managers may receive many events; size these limits to host memory.
+  maxConcurrentTurns: 4
+  maxResidentProcesses: 8
   idleTimeoutMs: 300000
   requestTimeoutMs: 30000
 

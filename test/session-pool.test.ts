@@ -69,6 +69,20 @@ class FakeClient extends EventEmitter implements RpcClientLike {
   }
 }
 
+class DeferredClient extends FakeClient {
+  override async request(
+    command: Record<string, unknown>,
+  ): Promise<RpcRecord> {
+    if (command.type !== "prompt") return super.request(command);
+    this.requests.push(command as RpcRecord);
+    return { type: "response", success: true };
+  }
+
+  settle(): void {
+    this.emit("event", { type: "agent_settled" });
+  }
+}
+
 class DialogExitClient extends FakeClient {
   override async request(
     command: Record<string, unknown>,
@@ -95,7 +109,14 @@ class DialogExitClient extends FakeClient {
 
 const temporaryDirectories: string[] = [];
 
-function setup() {
+function setup(
+  piOverrides: Partial<{
+    maxActiveSessions: number;
+    maxConcurrentTurns: number;
+    maxResidentProcesses: number;
+    idleTimeoutMs: number;
+  }> = {},
+) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-slack-team-pool-"));
   temporaryDirectories.push(directory);
   const config = agentConfigSchema.parse({
@@ -114,6 +135,7 @@ function setup() {
       agentDir: directory,
       sessionDir: path.join(directory, "sessions"),
       idleTimeoutMs: 10_000,
+      ...piOverrides,
     },
   });
   const registry = new Registry(path.join(directory, "state.sqlite"));
@@ -163,6 +185,102 @@ describe("PiSessionPool", () => {
       piSessionId: "session-01",
       status: "idle",
     });
+    await pool.shutdown();
+    registry.close();
+  });
+
+  it("reuses one process for different DM roots from the same user", async () => {
+    const { clients, pool, registry } = setup();
+    await pool.prompt(key, "U01", "first root");
+    await pool.prompt({ ...key, threadTs: "789.000" }, "U01", "second root");
+
+    expect(clients).toHaveLength(1);
+    expect(
+      registry.getConversation({ ...key, threadTs: "789.000" })?.sessionKey,
+    ).toBe(registry.getConversation(key)?.sessionKey);
+    await pool.shutdown();
+    registry.close();
+  });
+
+  it("uses different processes for different users and channel threads", async () => {
+    const { clients, pool, registry } = setup();
+    await pool.prompt(key, "U01", "user one");
+    await pool.prompt(
+      { ...key, channelId: "D02", threadTs: "222.000" },
+      "U02",
+      "user two",
+    );
+    await pool.prompt(
+      { ...key, channelId: "C01", threadTs: "333.000" },
+      "U01",
+      "thread one",
+    );
+    await pool.prompt(
+      { ...key, channelId: "C01", threadTs: "444.000" },
+      "U01",
+      "thread two",
+    );
+
+    expect(clients).toHaveLength(4);
+    await pool.shutdown();
+    registry.close();
+  });
+
+  it("runs different user sessions concurrently", async () => {
+    const { config, registry, logger } = setup({
+      maxConcurrentTurns: 2,
+      maxResidentProcesses: 2,
+    });
+    const clients: DeferredClient[] = [];
+    const pool = new PiSessionPool(
+      config,
+      registry,
+      logger,
+      async () => ({ cancelled: true }),
+      (options) => {
+        const client = new DeferredClient(options);
+        clients.push(client);
+        return client;
+      },
+    );
+
+    const first = pool.prompt(key, "U01", "first");
+    const second = pool.prompt(
+      { ...key, channelId: "D02", threadTs: "222.000" },
+      "U02",
+      "second",
+    );
+    await vi.waitFor(() => {
+      expect(clients).toHaveLength(2);
+      expect(
+        clients.every((client) =>
+          client.requests.some((request) => request.type === "prompt"),
+        ),
+      ).toBe(true);
+    });
+    clients.forEach((client) => client.settle());
+    await Promise.all([first, second]);
+
+    await pool.shutdown();
+    registry.close();
+  });
+
+  it("hibernates the least-recent idle process at resident capacity", async () => {
+    const { clients, pool, registry } = setup({
+      maxConcurrentTurns: 1,
+      maxResidentProcesses: 1,
+    });
+    const channelKey = { ...key, channelId: "C01" };
+    await pool.prompt(key, "U01", "direct");
+    await pool.prompt(channelKey, "U01", "channel");
+
+    expect(clients).toHaveLength(2);
+    expect(clients[0]?.running).toBe(false);
+    expect(clients[1]?.running).toBe(true);
+
+    await pool.prompt(key, "U01", "resume direct");
+    expect(clients).toHaveLength(3);
+    expect(clients[2]?.options.sessionFile).toBe("/tmp/new-session.jsonl");
     await pool.shutdown();
     registry.close();
   });

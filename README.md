@@ -74,8 +74,8 @@ Dedicated Slack app (Socket Mode)
 pi-slack-team runtime (one Unix account)
         │
         ├── authorization + event deduplication
-        ├── Slack thread → Pi session registry (SQLite)
-        ├── per-thread queue + global semaphore
+        ├── DM user / channel thread → Pi session registry (SQLite)
+        ├── per-session queue + global semaphore
         ├── manager tool ↔ private Unix IPC ↔ correlated Slack peer envelope
         │
         ├── active chat A → Pi RPC → session A.jsonl
@@ -84,13 +84,7 @@ pi-slack-team runtime (one Unix account)
 
 A runtime owns exactly one Slack app connection and runs as exactly one Unix user. Pi inherits only that user's working directory, agent instructions, tools, credentials, sessions, and OS permissions.
 
-The durable conversation key is:
-
-```text
-(team_id, app_id, channel_id, thread_ts)
-```
-
-A root message uses its own timestamp as the thread root. New sessions receive a bounded snapshot of prior thread messages marked as untrusted user context. Resumed sessions continue from Pi's JSONL session file.
+Slack conversations retain the durable key `(team_id, app_id, channel_id, thread_ts)`, while Pi sessions have an explicit scope. DMs use `(team_id, app_id, user_id)`, giving each human one isolated session per agent across top-level DM messages. Channel conversations use `(team_id, app_id, channel_id, thread_ts)`, keeping every channel thread isolated. New sessions receive a bounded snapshot of prior thread messages marked as untrusted user context. Resumed sessions continue from Pi's JSONL session file.
 
 Read [Architecture](docs/architecture.md) for process, identity, ownership, and storage details.
 
@@ -161,7 +155,8 @@ pi:
   cwd: /home/example-agent
   agentDir: /home/example-agent/.pi/agent
   sessionDir: /home/example-agent/.pi/agent/sessions
-  maxActiveSessions: 1
+  maxConcurrentTurns: 4
+  maxResidentProcesses: 8
   idleTimeoutMs: 300000
   requestTimeoutMs: 30000
 ```
@@ -241,8 +236,10 @@ In `summary` mode, partial tool output remains hidden. The bridge recognizes onl
 | `cwd` | Yes | — | Agent working directory |
 | `agentDir` | Yes | — | Pi configuration/instructions directory |
 | `sessionDir` | Yes | — | Persistent Pi JSONL session directory |
-| `maxActiveSessions` | No | `1` | Concurrent Pi turns for this runtime, maximum 32 |
-| `idleTimeoutMs` | No | `300000` | Stop an idle Pi subprocess while retaining its session |
+| `maxConcurrentTurns` | No | `4` | Concurrent Pi turns from different sessions, maximum 32 |
+| `maxResidentProcesses` | No | `8` | Resident Pi subprocess limit; must be at least the turn limit, maximum 32 |
+| `maxActiveSessions` | No | — | Deprecated alias used only when `maxConcurrentTurns` is absent |
+| `idleTimeoutMs` | No | `300000` | Stop an idle Pi subprocess while retaining its logical session |
 | `requestTimeoutMs` | No | `30000` | Pi RPC request timeout |
 | `autoSelect` | No | `[]` | Exact Pi UI select title/option standing authorizations, maximum 16 |
 
@@ -315,8 +312,8 @@ See [Operations](docs/operations.md) for onboarding, rollout, and failure handli
 1. Bolt acknowledges a Slack Socket Mode event.
 2. The runtime validates workspace, receiving app, conversation type, sender, bot status, subtype, and file limits. Inter-agent envelopes additionally require an exact configured sender app and bot user.
 3. The event ID is claimed in SQLite; retries become no-ops.
-4. The Slack thread is mapped to a durable conversation record.
-5. A new Pi session receives bounded prior thread context.
+4. The Slack conversation is mapped to its direct-user or channel-thread Pi session.
+5. A new logical Pi session receives bounded prior thread context.
 6. A Pi RPC subprocess starts or resumes and runs under the configured Unix account.
 7. Explicit requests receive throttled progress updates; ambient manager observations do not.
 8. Final text is rendered to Slack, or a manager's silent decision produces no message.

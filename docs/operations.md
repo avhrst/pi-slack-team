@@ -66,6 +66,10 @@ For each configured manager/worker pair:
 
 See [Slack app setup](slack-setup.md#10-canary-checklist) for the full checklist and troubleshooting.
 
+## Session-scope migration
+
+On first start after upgrading, the runtime adds `pi_sessions` and binds existing conversations to either a direct-user or channel-thread session. When one user has several legacy DM sessions, the most recently active persisted session becomes canonical; older JSONL files are retained but are no longer routed. Back up `state.sqlite` and its WAL/SHM files while the service is stopped before rollout. The migration is idempotent and does not rewrite rows that already have a session binding.
+
 ## Changing roles
 
 Changing config alone is insufficient when promoting a worker to manager. Slack must also have `message.channels` and `message.groups` in bot event subscriptions. Apply the manager manifest, save the Slack configuration, invite the app to bounded channels, restart, and perform an unmentioned-message canary.

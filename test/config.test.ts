@@ -51,9 +51,46 @@ describe("agent config", () => {
     expect(config.slack.maxFileBytes).toBe(20 * 1_024 * 1_024);
     expect(config.slack.maxFilesPerMessage).toBe(5);
     expect(config.pi.command).toBe("/usr/bin/pi");
-    expect(config.pi.maxActiveSessions).toBe(1);
+    expect(config.pi.maxActiveSessions).toBeUndefined();
+    expect(config.pi.maxConcurrentTurns).toBe(4);
+    expect(config.pi.maxResidentProcesses).toBe(8);
     expect(config.pi.idleTimeoutMs).toBe(300_000);
     expect(config.pi.autoSelect).toEqual([]);
+  });
+
+  it("maps the deprecated active-session limit to concurrent turns", () => {
+    const input = structuredClone(validConfig());
+    Reflect.deleteProperty(input.pi, "maxConcurrentTurns");
+    const config = agentConfigSchema.parse({
+      ...input,
+      pi: { ...input.pi, maxActiveSessions: 2 },
+    });
+    expect(config.pi.maxConcurrentTurns).toBe(2);
+  });
+
+  it("validates concurrent turn and resident process limits", () => {
+    const input = structuredClone(validConfig());
+    const config = agentConfigSchema.parse({
+      ...input,
+      pi: {
+        ...input.pi,
+        maxConcurrentTurns: 4,
+        maxResidentProcesses: 8,
+      },
+    });
+    expect(config.pi.maxConcurrentTurns).toBe(4);
+    expect(config.pi.maxResidentProcesses).toBe(8);
+
+    expect(() =>
+      agentConfigSchema.parse({
+        ...input,
+        pi: {
+          ...input.pi,
+          maxConcurrentTurns: 4,
+          maxResidentProcesses: 2,
+        },
+      }),
+    ).toThrow("greater than or equal to the concurrent turn limit");
   });
 
   it("accepts explicit role and raw progress output", () => {

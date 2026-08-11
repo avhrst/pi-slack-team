@@ -73,12 +73,19 @@ export const agentConfigSchema = z
         cwd: absolutePath,
         agentDir: absolutePath,
         sessionDir: absolutePath,
-        maxActiveSessions: z.number().int().min(1).max(32).default(1),
+        maxActiveSessions: z.number().int().min(1).max(32).optional(),
+        maxConcurrentTurns: z.number().int().min(1).max(32).optional(),
+        maxResidentProcesses: z.number().int().min(1).max(32).default(8),
         idleTimeoutMs: z.number().int().min(10_000).max(86_400_000).default(300_000),
         requestTimeoutMs: z.number().int().min(1_000).max(300_000).default(30_000),
         autoSelect: autoSelectSchema,
       })
-      .strict(),
+      .strict()
+      .transform((pi) => ({
+        ...pi,
+        maxConcurrentTurns:
+          pi.maxConcurrentTurns ?? pi.maxActiveSessions ?? 4,
+      })),
     interAgent: z
       .object({
         peers: z.array(interAgentPeerSchema).min(1).max(32),
@@ -108,6 +115,15 @@ export const agentConfigSchema = z
   })
   .strict()
   .superRefine((config, context) => {
+    const concurrentTurns =
+      config.pi.maxConcurrentTurns ?? config.pi.maxActiveSessions ?? 4;
+    if (config.pi.maxResidentProcesses < concurrentTurns) {
+      context.addIssue({
+        code: "custom",
+        path: ["pi", "maxResidentProcesses"],
+        message: "must be greater than or equal to the concurrent turn limit",
+      });
+    }
     const peers = config.interAgent?.peers ?? [];
     const seenAgentIds = new Set<string>();
     const seenAppIds = new Set<string>();

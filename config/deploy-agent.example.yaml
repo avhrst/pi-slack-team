@@ -28,7 +28,8 @@ pi:
   cwd: /home/deploy-agent/ms-app-update
   agentDir: /home/deploy-agent/.pi/agent
   sessionDir: /home/deploy-agent/.pi/agent/sessions
-  maxActiveSessions: 1
+  maxConcurrentTurns: 4
+  maxResidentProcesses: 8
   idleTimeoutMs: 300000
 
 # Production credentials are loaded from systemd:

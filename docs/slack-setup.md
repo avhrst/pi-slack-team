@@ -119,7 +119,8 @@ pi:
   cwd: /home/coordinator-agent
   agentDir: /home/coordinator-agent/.pi/agent
   sessionDir: /home/coordinator-agent/.pi/agent/sessions
-  maxActiveSessions: 1
+  maxConcurrentTurns: 4
+  maxResidentProcesses: 8
   idleTimeoutMs: 300000
   requestTimeoutMs: 30000
 ```

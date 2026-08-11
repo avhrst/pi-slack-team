@@ -11,6 +11,7 @@ import {
 } from "./chat-key.js";
 import type { Registry } from "../storage/registry.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
+import { piSessionKey, serializePiSessionKey } from "./session-key.js";
 
 export type MessageDisposition =
   | { type: "ignored"; reason: string }
@@ -124,10 +125,15 @@ export class ChatService {
     }
 
     await hooks.onAccepted?.();
-    const promptText = hooks.preparePrompt
-      ? await hooks.preparePrompt({ isNewConversation: !existing?.piSessionFile })
-      : message.text;
     const ownerUserId = existing?.ownerUserId ?? message.userId;
+    const sessionKey =
+      existing?.sessionKey ?? serializePiSessionKey(piSessionKey(key, ownerUserId));
+    const persistedSession = this.#registry.getPiSession(sessionKey);
+    const promptText = hooks.preparePrompt
+      ? await hooks.preparePrompt({
+          isNewConversation: !persistedSession?.piSessionFile,
+        })
+      : message.text;
     const result = sharedConversation
       ? await this.#pool.prompt(
           key,

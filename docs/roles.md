@@ -111,7 +111,7 @@ The durable conversation key is:
 (team_id, app_id, channel_id, thread_ts)
 ```
 
-A root message uses its own timestamp as `thread_ts`. The first accepted human normally becomes the durable conversation owner. A configured manager bot is a provisional owner when its delegation creates a worker conversation.
+A root message uses its own timestamp as `thread_ts`. Direct messages from the same human to the same agent share one logical Pi session across roots; channel threads retain separate sessions. The first accepted human normally becomes the durable conversation owner. A configured manager bot is a provisional owner when its delegation creates a worker conversation.
 
 - The first allowed human who explicitly mentions that worker after the delegated turn is idle may atomically claim the provisional bot-owned conversation. This preserves the Pi session while binding future confirmations to a human.
 - Workers reject takeover by another human after a human owns the thread. Configured manager delegations may still continue that worker session while preserving its human owner.
@@ -143,7 +143,7 @@ Choose `manager` only when:
 - tool side effects are constrained by the Unix account and agent policy;
 - model usage for every qualifying channel message is acceptable.
 
-A manager evaluates more events and can create many persistent sessions. Keep channel membership and `allowedUserIds` narrow, and start with `pi.maxActiveSessions: 1`.
+A manager evaluates more events and can create many persistent sessions. Keep channel membership and `allowedUserIds` narrow, size `pi.maxConcurrentTurns` and `pi.maxResidentProcesses` to host memory, and use `maxConcurrentTurns: 1` when serialized execution is required.
 
 ## Migrating an existing worker to manager
 

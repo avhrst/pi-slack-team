@@ -12,6 +12,12 @@ import type {
   Registry,
 } from "../storage/registry.js";
 import { serializeConversationKey } from "../routing/chat-key.js";
+import {
+  piSessionKey,
+  piSessionName,
+  serializePiSessionKey,
+  type PiSessionKey,
+} from "../routing/session-key.js";
 import { RpcClient, type RpcRecord } from "./rpc-client.js";
 import type { RpcClientOptions } from "./rpc-client.js";
 
@@ -39,6 +45,8 @@ interface SessionHandle {
   client: RpcClientLike;
   sessionFile: string;
   sessionId: string;
+  busy: boolean;
+  lastUsedAt: number;
   idleTimer?: NodeJS.Timeout;
 }
 
@@ -74,10 +82,12 @@ export class PiSessionPool {
   readonly #registry: Registry;
   readonly #logger: Logger;
   readonly #queue = new KeyedSerialQueue();
+  readonly #capacityQueue = new KeyedSerialQueue();
   readonly #semaphore: Semaphore;
   readonly #handles = new Map<string, SessionHandle>();
   readonly #uiHandler: PiUiHandler;
   readonly #clientFactory: RpcClientFactory;
+  #startingProcesses = 0;
 
   constructor(
     config: AgentConfig,
@@ -89,7 +99,9 @@ export class PiSessionPool {
     this.#config = config;
     this.#registry = registry;
     this.#logger = logger;
-    this.#semaphore = new Semaphore(config.pi.maxActiveSessions);
+    this.#semaphore = new Semaphore(
+      config.pi.maxConcurrentTurns ?? config.pi.maxActiveSessions ?? 4,
+    );
     this.#uiHandler = uiHandler;
     this.#clientFactory = clientFactory;
   }
@@ -101,8 +113,10 @@ export class PiSessionPool {
     onEvent?: (event: RpcRecord) => void,
     allowExistingOwner = false,
   ): Promise<PiTurnResult> {
-    const serialized = serializeConversationKey(key);
-    return this.#queue.run(serialized, () =>
+    const serializedConversation = serializeConversationKey(key);
+    const requestedSession = piSessionKey(key, ownerUserId);
+    const serializedSession = serializePiSessionKey(requestedSession);
+    return this.#queue.run(serializedSession, () =>
       this.#semaphore.run(async () => {
         const conversation =
           this.#registry.getConversation(key) ??
@@ -114,8 +128,17 @@ export class PiSessionPool {
           throw new Error("Conversation belongs to another Slack user");
         }
 
-        const handle = await this.#getOrStart(key, conversation);
+        if (conversation.sessionKey !== serializedSession) {
+          throw new Error("Conversation is bound to a different Pi session");
+        }
+
+        const handle = await this.#getOrStart(
+          key,
+          requestedSession,
+          conversation,
+        );
         if (handle.idleTimer) clearTimeout(handle.idleTimer);
+        handle.busy = true;
         this.#registry.setStatus(key, "running");
 
         const eventListener = (event: RpcRecord) => {
@@ -140,7 +163,7 @@ export class PiSessionPool {
           });
           const value = responseData(lastMessage).text;
           this.#registry.setStatus(key, "idle");
-          this.#scheduleIdle(serialized, handle);
+          this.#scheduleIdle(serializedSession, handle);
           return {
             text:
               typeof value === "string" && value.trim()
@@ -153,12 +176,15 @@ export class PiSessionPool {
           this.#registry.setStatus(key, "error");
           this.#logger.error("pi_turn_failed", {
             agentId: this.#config.agentId,
-            conversationKey: serialized,
+            conversationKey: serializedConversation,
+            piSessionKey: serializedSession,
             error,
           });
-          await this.#disposeHandle(serialized, handle);
+          await this.#disposeHandle(serializedSession, handle);
           throw error;
         } finally {
+          handle.busy = false;
+          handle.lastUsedAt = Date.now();
           handle.client.off("event", eventListener);
         }
       }),
@@ -166,8 +192,9 @@ export class PiSessionPool {
   }
 
   async abort(key: ConversationKey): Promise<void> {
-    const serialized = serializeConversationKey(key);
-    const handle = this.#handles.get(serialized);
+    const conversation = this.#registry.getConversation(key);
+    if (!conversation) return;
+    const handle = this.#handles.get(conversation.sessionKey);
     if (!handle) return;
     await handle.client.request({ type: "abort" }).catch(() => undefined);
   }
@@ -181,10 +208,12 @@ export class PiSessionPool {
 
   async #getOrStart(
     key: ConversationKey,
+    sessionKey: PiSessionKey,
     conversation: ConversationRecord,
   ): Promise<SessionHandle> {
-    const serialized = serializeConversationKey(key);
-    const existing = this.#handles.get(serialized);
+    const serializedConversation = serializeConversationKey(key);
+    const serializedSession = serializePiSessionKey(sessionKey);
+    const existing = this.#handles.get(serializedSession);
     if (existing?.client.running) return existing;
 
     const interAgentEnvironment = interAgentExtensionEnvironment(
@@ -205,49 +234,92 @@ export class PiSessionPool {
         : {}),
       ...(conversation.piSessionFile
         ? { sessionFile: conversation.piSessionFile }
-        : { sessionName: `slack-${key.threadTs.replace(/\W/g, "-").slice(0, 48)}` }),
+        : { sessionName: piSessionName(sessionKey) }),
     });
     client.on("stderr", () => {
       this.#logger.warn("pi_stderr", {
         agentId: this.#config.agentId,
-        conversationKey: serialized,
+        conversationKey: serializedConversation,
+        piSessionKey: serializedSession,
       });
     });
     client.on("protocolError", () => {
       this.#logger.error("pi_protocol_error", {
         agentId: this.#config.agentId,
-        conversationKey: serialized,
+        conversationKey: serializedConversation,
+        piSessionKey: serializedSession,
       });
     });
     client.on("unexpectedExit", () => {
       this.#logger.error("pi_unexpected_exit", {
         agentId: this.#config.agentId,
-        conversationKey: serialized,
+        conversationKey: serializedConversation,
+        piSessionKey: serializedSession,
       });
-      this.#handles.delete(serialized);
+      this.#handles.delete(serializedSession);
     });
 
-    await client.start();
-    const stats = responseData(
-      await client.request({ type: "get_session_stats" }),
-    );
-    const sessionFile = stats.sessionFile;
-    const sessionId = stats.sessionId;
-    if (typeof sessionFile !== "string" || typeof sessionId !== "string") {
-      await client.stop();
-      throw new Error("Pi did not return persistent session metadata");
+    await this.#capacityQueue.run("resident-capacity", async () => {
+      await this.#ensureResidentCapacity();
+      this.#startingProcesses += 1;
+    });
+    let registered = false;
+    try {
+      await client.start();
+      const stats = responseData(
+        await client.request({ type: "get_session_stats" }),
+      );
+      const sessionFile = stats.sessionFile;
+      const sessionId = stats.sessionId;
+      if (typeof sessionFile !== "string" || typeof sessionId !== "string") {
+        await client.stop();
+        throw new Error("Pi did not return persistent session metadata");
+      }
+
+      const handle: SessionHandle = {
+        client,
+        sessionFile,
+        sessionId,
+        busy: false,
+        lastUsedAt: Date.now(),
+      };
+      this.#registry.setSession(key, sessionFile, sessionId);
+      this.#handles.set(serializedSession, handle);
+      registered = true;
+      this.#logger.info("pi_session_ready", {
+        agentId: this.#config.agentId,
+        conversationKey: serializedConversation,
+        piSessionKey: serializedSession,
+        sessionId,
+        resumed: Boolean(conversation.piSessionFile),
+      });
+      return handle;
+    } finally {
+      this.#startingProcesses -= 1;
+      if (!registered) await client.stop().catch(() => undefined);
     }
+  }
 
-    const handle: SessionHandle = { client, sessionFile, sessionId };
-    this.#handles.set(serialized, handle);
-    this.#registry.setSession(key, sessionFile, sessionId);
-    this.#logger.info("pi_session_ready", {
+  async #ensureResidentCapacity(): Promise<void> {
+    if (
+      this.#handles.size + this.#startingProcesses <
+      this.#config.pi.maxResidentProcesses
+    ) {
+      return;
+    }
+    const idle = [...this.#handles.entries()]
+      .filter(([, handle]) => !handle.busy)
+      .sort(([, left], [, right]) => left.lastUsedAt - right.lastUsedAt);
+    const oldest = idle[0];
+    if (!oldest) {
+      throw new Error("All resident Pi processes are busy");
+    }
+    await this.#disposeHandle(oldest[0], oldest[1]);
+    this.#logger.info("pi_session_hibernated", {
       agentId: this.#config.agentId,
-      conversationKey: serialized,
-      sessionId,
-      resumed: Boolean(conversation.piSessionFile),
+      piSessionKey: oldest[0],
+      reason: "resident-capacity",
     });
-    return handle;
   }
 
   #waitForSettled(client: RpcClientLike): {
