@@ -250,6 +250,7 @@ describe("ChatService", () => {
       "U01",
       "continue directly",
       undefined,
+      true,
     );
 
     const delegated = message({
@@ -289,10 +290,15 @@ describe("ChatService", () => {
           ts: "126.000",
         }),
       ),
-    ).resolves.toMatchObject({
-      type: "ignored",
-      reason: "conversation-owner-mismatch",
-    });
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ channelId: "C01", threadTs: "123.456" }),
+      "U01",
+      "hello",
+      undefined,
+      true,
+    );
+    expect(registry.getConversation(key)?.ownerUserId).toBe("U01");
     registry.close();
   });
 
@@ -355,6 +361,42 @@ describe("ChatService", () => {
     registry.close();
   });
 
+  it("allows authorized users to share a worker channel thread", async () => {
+    const { service, prompt, registry } = setup();
+    const threadKey = {
+      teamId: "T01",
+      appId: "A01",
+      channelId: "C01",
+      threadTs: "123.456",
+    };
+    registry.createConversation(threadKey, "U01");
+    registry.setSession(threadKey, "/tmp/shared.jsonl", "shared-session");
+
+    await expect(
+      service.handleMessage(
+        message({
+          kind: "app-mention",
+          eventId: "Ev02",
+          channelId: "C01",
+          channelType: "channel",
+          userId: "U02",
+          threadTs: "123.456",
+          ts: "124.000",
+          text: "continue the shared work",
+        }),
+      ),
+    ).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenCalledWith(
+      threadKey,
+      "U01",
+      "continue the shared work",
+      undefined,
+      true,
+    );
+    expect(registry.getConversation(threadKey)?.ownerUserId).toBe("U01");
+    registry.close();
+  });
+
   it("accepts an authorized app mention in a channel", async () => {
     const { service, prompt, registry } = setup();
     await expect(
@@ -372,6 +414,7 @@ describe("ChatService", () => {
       "U01",
       "help in this channel",
       undefined,
+      true,
     );
     registry.close();
   });

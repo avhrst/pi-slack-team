@@ -110,7 +110,10 @@ export class ChatService {
     const sharedManagerChannel =
       this.#config.role === "manager" &&
       ["channel-message", "app-mention"].includes(message.kind);
-    const sharedConversation = sharedManagerChannel || Boolean(delegation);
+    const sharedWorkerThread =
+      this.#config.role === "worker" && message.kind === "app-mention";
+    const sharedConversation =
+      sharedManagerChannel || sharedWorkerThread || Boolean(delegation);
     if (
       existing &&
       existing.ownerUserId !== message.userId &&
