@@ -129,4 +129,99 @@ describe("SlackProgressReporter", () => {
     expect(update).toHaveBeenCalledTimes(2);
     expect(attempts).toEqual(["configured", "summary-fallback"]);
   });
+
+  it("coalesces queued progress while a Slack update is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const updates: string[] = [];
+      let releaseFirst: (() => void) | undefined;
+      const firstUpdate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const update = vi.fn(async (text: string) => {
+        updates.push(text);
+        if (updates.length === 1) await firstUpdate;
+      });
+      const reporter = new SlackProgressReporter(
+        "summary",
+        update,
+        () => undefined,
+      );
+      const progress = (completed: number) =>
+        event("tool_execution_update", {
+          partialResult: {
+            content: [{
+              type: "text",
+              text: `PI_DEPLOY_PROGRESS ${JSON.stringify({
+                version: 1,
+                stage: "sql-files",
+                state: "running",
+                planned: 3,
+                completed,
+                pending: 3 - completed,
+                ok: completed,
+                warn: 0,
+                fail: 0,
+                skip: 0,
+                current: `TT${completed}`,
+              })}`,
+            }],
+          },
+        });
+
+      reporter.record(progress(1));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(updates[0]).toContain("1/3");
+
+      reporter.record(progress(2));
+      reporter.record(progress(3));
+      releaseFirst?.();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(updates[1]).toContain("3/3");
+      expect(updates[1]).not.toContain("2/3");
+      await reporter.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out a stalled update and still sends the latest final state", async () => {
+    vi.useFakeTimers();
+    try {
+      const attempts: ProgressUpdateAttempt[] = [];
+      const updates: string[] = [];
+      const stalled = new Promise<void>(() => undefined);
+      const update = vi.fn(async (text: string) => {
+        updates.push(text);
+        if (updates.length === 1) await stalled;
+      });
+      const reporter = new SlackProgressReporter(
+        "summary",
+        update,
+        (_error, attempt) => attempts.push(attempt),
+        100,
+      );
+
+      reporter.record(
+        event("message_update", {
+          assistantMessageEvent: { type: "text_delta", delta: "Checking." },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+
+      const completing = reporter.complete("Done");
+      await vi.advanceTimersByTimeAsync(100);
+      await completing;
+
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(updates[1]).toContain(":white_check_mark: *Pi completed*");
+      expect(attempts).toEqual(["configured"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

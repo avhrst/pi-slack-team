@@ -1,4 +1,5 @@
 import { App, LogLevel, SocketModeReceiver } from "@slack/bolt";
+import { WebClient } from "@slack/web-api";
 import type { AgentConfig } from "../config/schema.js";
 import type { SlackCredentials } from "../config/load-config.js";
 import type { InterAgentGateway } from "../inter-agent/gateway.js";
@@ -34,6 +35,7 @@ import { SlackUiBroker } from "./slack-ui.js";
 import { addSlackThreadContext } from "./thread-context.js";
 
 const SLACK_CHUNK_LIMIT = 38_000;
+const SLACK_PROGRESS_REQUEST_TIMEOUT_MS = 15_000;
 function chunks(text: string): string[] {
   if (text.length <= SLACK_CHUNK_LIMIT) return [text];
   const result: string[] = [];
@@ -50,6 +52,7 @@ export class SlackBridge {
   readonly #logger: Logger;
   readonly #app: App;
   readonly #connectionMonitor: SlackConnectionMonitor;
+  readonly #progressClient: WebClient;
   readonly #botToken: string;
   readonly #uiBroker = new SlackUiBroker();
   readonly #delegatedTurns = new Map<string, number>();
@@ -68,6 +71,12 @@ export class SlackBridge {
     this.#interAgent = interAgent;
     this.#botToken = credentials.botToken;
     this.#logger = logger;
+    this.#progressClient = new WebClient(credentials.botToken, {
+      logLevel: LogLevel.ERROR,
+      timeout: SLACK_PROGRESS_REQUEST_TIMEOUT_MS,
+      retryConfig: { retries: 0 },
+      rejectRateLimitedCalls: true,
+    });
     const receiver = new SocketModeReceiver({
       appToken: credentials.appToken,
       autoReconnectEnabled: true,
@@ -241,14 +250,23 @@ export class SlackBridge {
       );
     }
     let workingTs: string | undefined;
+    let progressUpdateSequence = 0;
     const progress = new SlackProgressReporter(
       this.#config.slack.progressMode,
       async (text) => {
         if (!workingTs) return;
-        await client.chat.update({
+        const updateSequence = ++progressUpdateSequence;
+        const startedAt = Date.now();
+        await this.#progressClient.chat.update({
           channel: message.channelId,
           ts: workingTs,
           text,
+        });
+        this.#logger.debug("slack_progress_updated", {
+          agentId: this.#config.agentId,
+          eventId: message.eventId,
+          updateSequence,
+          durationMs: Date.now() - startedAt,
         });
       },
       (error, updateAttempt) => {
@@ -257,6 +275,7 @@ export class SlackBridge {
           eventId: message.eventId,
           progressMode: this.#config.slack.progressMode,
           updateAttempt,
+          updateSequence: progressUpdateSequence,
           error,
         });
       },
