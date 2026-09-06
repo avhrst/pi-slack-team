@@ -48,5 +48,10 @@ export function runDoctor(config: AgentConfig): DoctorCheck[] {
     if (result.status !== 0) throw new Error("Pi version check failed");
     return result.stdout.trim();
   });
+  if (config.pi.transport === "tmux") check("tmux_version", () => {
+    const result = spawnSync(config.pi.tmuxCommand, ["-V"], { encoding: "utf8", timeout: 10_000 });
+    if (result.status !== 0 || !/^tmux (?:3\.[5-9]|[4-9]\.)/.test(result.stdout)) throw new Error("tmux 3.5+ required");
+    return result.stdout.trim();
+  });
   return checks;
 }

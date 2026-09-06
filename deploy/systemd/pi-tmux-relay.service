@@ -1,0 +1,27 @@
+[Unit]
+Description=Pi team tmux buffer relay (fixed sockets and reciprocal peer ACLs)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/node /opt/pi-slack-team/current/dist/tmux/cli.js relay
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+UMask=0077
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

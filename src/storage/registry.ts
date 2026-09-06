@@ -26,7 +26,7 @@ export interface ConversationRecord extends ConversationKey {
 
 export interface PiSessionRecord {
   sessionKey: string;
-  scope: PiSessionKey["scope"];
+  scope: PiSessionKey["scope"] | "agent";
   ownerUserId: string;
   piSessionFile: string | null;
   piSessionId: string | null;
@@ -145,6 +145,28 @@ export class Registry {
         consumed_at TEXT
       ) STRICT;
     `);
+
+    // Preserve legacy sessions; widen the CHECK without rewriting their history.
+    const sessionTable = this.#database.prepare(
+      "SELECT sql FROM sqlite_master WHERE name = 'pi_sessions'",
+    ).get() as { sql: string };
+    if (!sessionTable.sql.includes("'agent'")) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE pi_sessions RENAME TO pi_sessions_legacy;
+        CREATE TABLE pi_sessions (
+          session_key TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('direct-user', 'channel-thread', 'agent')),
+          owner_user_id TEXT NOT NULL,
+          pi_session_file TEXT, pi_session_id TEXT,
+          status TEXT NOT NULL CHECK (status IN ('starting', 'idle', 'running', 'error')),
+          created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL
+        ) STRICT;
+        INSERT INTO pi_sessions SELECT * FROM pi_sessions_legacy;
+        DROP TABLE pi_sessions_legacy;
+        COMMIT;
+      `);
+    }
 
     const columns = this.#database
       .prepare("PRAGMA table_info(conversations)")
@@ -341,6 +363,21 @@ export class Registry {
       )
       .run(newOwnerUserId, now.toISOString(), conversation.sessionKey);
     return this.getConversation(key);
+  }
+
+  bindAgentSession(key: ConversationKey, sessionFile: string, sessionId: string): void {
+    const sessionKey = `agent:${key.teamId}:${key.appId}`;
+    const now = new Date().toISOString();
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO pi_sessions
+        (session_key, scope, owner_user_id, status, created_at, last_activity_at)
+      VALUES (?, 'agent', '', 'idle', ?, ?)
+    `).run(sessionKey, now, now);
+    this.#database.prepare(`
+      UPDATE conversations SET session_key = ?
+      WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
+    `).run(sessionKey, key.teamId, key.appId, key.channelId, key.threadTs);
+    this.setSession(key, sessionFile, sessionId);
   }
 
   setSession(

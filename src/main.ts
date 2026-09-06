@@ -5,11 +5,12 @@ import { loadConfig, loadSlackCredentials } from "./config/load-config.js";
 import { runDoctor } from "./cli/doctor.js";
 import { InterAgentGateway } from "./inter-agent/gateway.js";
 import { createLogger } from "./observability/logger.js";
-import { PiSessionPool } from "./pi/session-pool.js";
+import { PiSessionPool, type PiUiHandler } from "./pi/session-pool.js";
 import { ChatService } from "./routing/chat-service.js";
 import { assertRuntimeIdentity } from "./security/runtime-identity.js";
 import { SlackBridge } from "./slack/slack-bridge.js";
 import { Registry } from "./storage/registry.js";
+import { TmuxAgentRunner } from "./tmux/agent-runner.js";
 
 function usage(): never {
   process.stderr.write(
@@ -34,17 +35,19 @@ async function start(configPath: string): Promise<void> {
   const registry = new Registry(path.join(config.stateDir, "state.sqlite"));
   const interAgent = new InterAgentGateway(config, registry, logger);
   const slackReference: { bridge?: SlackBridge } = {};
-  const pool = new PiSessionPool(config, registry, logger, async (context) =>
-    slackReference.bridge
-      ? slackReference.bridge.handlePiUiRequest(context)
-      : { cancelled: true },
-  );
+  const uiHandler: PiUiHandler = async (context) =>
+    slackReference.bridge ? slackReference.bridge.handlePiUiRequest(context) : { cancelled: true };
+  const pool = config.pi.transport === "tmux"
+    ? new TmuxAgentRunner(config, configPath, registry, logger, uiHandler)
+    : new PiSessionPool(config, registry, logger, uiHandler);
   const chatService = new ChatService(config, registry, pool, logger);
   let stopping = false;
+  let healthTimer: NodeJS.Timeout | undefined;
 
   const shutdown = async (signal: string) => {
     if (stopping) return;
     stopping = true;
+    if (healthTimer) clearInterval(healthTimer);
     logger.info("runtime_stopping", { agentId: config.agentId, signal });
     await bridge.stop().catch(() => undefined);
     await interAgent.stop().catch(() => undefined);
@@ -83,8 +86,15 @@ async function start(configPath: string): Promise<void> {
   });
 
   try {
+    if (pool instanceof TmuxAgentRunner) await pool.start();
     await interAgent.start();
     await bridge.start();
+    if (pool instanceof TmuxAgentRunner) {
+      healthTimer = setInterval(() => {
+        void pool.health().catch(() => failRuntime(new Error("tmux agent is no longer healthy")));
+      }, 5_000);
+      healthTimer.unref();
+    }
   } catch (error) {
     await shutdown("startup_failure");
     throw error;
@@ -93,6 +103,7 @@ async function start(configPath: string): Promise<void> {
     agentId: config.agentId,
     role: config.role,
     unixUser: config.expectedUnixUser,
+    transport: config.pi.transport,
   });
 }
 

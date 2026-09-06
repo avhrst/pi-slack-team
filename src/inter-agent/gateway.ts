@@ -117,6 +117,7 @@ export class InterAgentGateway {
 
   get enabledForManager(): boolean {
     return Boolean(
+      this.#config.pi.transport !== "tmux" &&
       this.#config.role === "manager" &&
         this.#config.interAgent?.peers.some((peer) => peer.role === "worker"),
     );
@@ -206,7 +207,8 @@ export class InterAgentGateway {
   parseResponse(
     message: IncomingSlackMessage,
   ): IncomingDelegationResponse | undefined {
-    return incomingDelegationResponse(this.#config, message);
+    return this.#config.pi.transport === "tmux"
+      ? undefined : incomingDelegationResponse(this.#config, message);
   }
 
   acceptResponse(response: IncomingDelegationResponse): void {

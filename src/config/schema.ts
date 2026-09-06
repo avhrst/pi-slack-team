@@ -69,6 +69,9 @@ export const agentConfigSchema = z
       .strict(),
     pi: z
       .object({
+        transport: z.enum(["rpc", "tmux"]).default("rpc"),
+        tmuxCommand: absolutePath.default("/usr/local/bin/tmux"),
+        turnTimeoutMs: z.number().int().min(10_000).max(86_400_000).default(3_600_000),
         command: absolutePath.default("/usr/bin/pi"),
         cwd: absolutePath,
         agentDir: absolutePath,
@@ -83,8 +86,9 @@ export const agentConfigSchema = z
       .strict()
       .transform((pi) => ({
         ...pi,
-        maxConcurrentTurns:
-          pi.maxConcurrentTurns ?? pi.maxActiveSessions ?? 4,
+        maxConcurrentTurns: pi.transport === "tmux"
+          ? 1 : pi.maxConcurrentTurns ?? pi.maxActiveSessions ?? 4,
+        maxResidentProcesses: pi.transport === "tmux" ? 1 : pi.maxResidentProcesses,
       })),
     interAgent: z
       .object({

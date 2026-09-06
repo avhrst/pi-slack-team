@@ -1,0 +1,25 @@
+# One shared interactive Pi per agent. See docs/tmux-team.md.
+version: 1
+agentId: example-worker
+role: worker
+expectedUnixUser: pi-worker
+stateDir: /home/pi-worker/.local/state/pi-slack-team
+slack:
+  teamId: T0000000000
+  appId: A0000000000
+  allowedUserIds: [U0000000000]
+  progressMode: summary
+pi:
+  transport: tmux
+  tmuxCommand: /usr/local/bin/tmux
+  command: /usr/bin/pi
+  cwd: /home/pi-worker
+  agentDir: /home/pi-worker/.pi/agent
+  sessionDir: /home/pi-worker/.pi/agent/sessions
+  turnTimeoutMs: 3600000
+interAgent:
+  peers:
+    - agentId: example-manager
+      role: manager
+      appId: A00000000000
+      botUserId: U00000000000

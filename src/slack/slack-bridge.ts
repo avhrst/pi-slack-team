@@ -239,7 +239,8 @@ export class SlackBridge {
   ): Promise<void> {
     const managerObservation =
       this.#config.role === "manager" && message.kind === "channel-message";
-    const delegatedRequest = incomingDelegationRequest(this.#config, message);
+    const delegatedRequest = this.#config.pi.transport === "tmux"
+      ? undefined : incomingDelegationRequest(this.#config, message);
     const delegatedKey = delegatedRequest
       ? serializeConversationKey(conversationKey(message))
       : undefined;
@@ -287,7 +288,8 @@ export class SlackBridge {
           const posted = await client.chat.postMessage({
             channel: message.channelId,
             thread_ts: message.threadTs ?? message.ts,
-            text: ":hourglass_flowing_sand: Working…",
+            text: this.#config.pi.transport === "tmux"
+              ? ":hourglass_flowing_sand: Queued for the agent…" : ":hourglass_flowing_sand: Working…",
           });
           workingTs = posted.ts;
         },

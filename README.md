@@ -1,8 +1,20 @@
 # pi-slack-team
 
-Run one Slack app per Linux-isolated [Pi coding agent](https://github.com/earendil-works/pi) and map each Slack DM or channel thread to a persistent Pi session.
+Run one Slack app per Linux-isolated [Pi coding agent](https://github.com/earendil-works/pi). Two backends are supported: a persistent interactive **tmux team** and the legacy per-chat headless RPC runtime.
 
-`pi-slack-team` is a standalone Node.js runtime, not an extension attached to an already-running interactive Pi session. It connects to Slack over Socket Mode, starts headless Pi RPC subprocesses on demand, streams safe progress, and resumes conversation state after idle hibernation or service restarts.
+## tmux team (recommended for observable shared agents)
+
+Set `pi.transport: tmux` for **one agent → one tmux session → one Pi process/history**, without user/thread-specific Pi sessions. Slack remains the human interface; manager/worker messages use tmux buffers and `wait-for` through a narrow local relay. Each agent retains its own Unix account and private tmux server.
+
+```bash
+pi-team list
+pi-team watch dev-agent       # read-only view of the real agent terminal
+pi-team attach support-agent  # interactive operator access
+```
+
+**Shared context is not user-isolated.** Requests are serialized, current-sender authorization is preserved, and old session files are retained without automatic merging. See [tmux architecture, deployment and rollback](docs/tmux-team.md) and the [manager](config/tmux-manager.example.yaml)/[worker](config/tmux-worker.example.yaml) examples.
+
+The rest of this README describes the legacy **`pi.transport: rpc`** backend unless noted otherwise. RPC remains the default for existing installations: the standalone runtime connects over Socket Mode, starts headless Pi subprocesses on demand, and resumes per-chat state after idle hibernation.
 
 > **Security status:** this project is pre-1.0 and exposes coding-agent tools through Slack. Start with a non-production canary, use a strict human allowlist, and read [the security model](docs/security.md) before deployment.
 

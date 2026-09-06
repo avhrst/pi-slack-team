@@ -31,6 +31,7 @@ export interface PiPromptRunner {
     text: string,
     onEvent?: (event: RpcRecord) => void,
     allowExistingOwner?: boolean,
+    sourceUserId?: string,
   ): Promise<PiTurnResult>;
 }
 
@@ -64,7 +65,8 @@ export class ChatService {
     message: IncomingSlackMessage,
     hooks: MessageHooks = {},
   ): Promise<MessageDisposition> {
-    const delegation = incomingDelegationRequest(this.#config, message);
+    const delegation = this.#config.pi.transport === "tmux"
+      ? undefined : incomingDelegationRequest(this.#config, message);
     const rejection = this.#rejectionReason(message, delegation);
     if (rejection) {
       this.#logger.warn("slack_message_ignored", {
@@ -134,9 +136,17 @@ export class ChatService {
     const persistedSession = this.#registry.getPiSession(sessionKey);
     const promptText = hooks.preparePrompt
       ? await hooks.preparePrompt({
-          isNewConversation: !persistedSession?.piSessionFile,
+          isNewConversation: this.#config.pi.transport === "tmux"
+            ? !existing || !existing.sessionKey.startsWith("agent:")
+            : !persistedSession?.piSessionFile,
         })
       : message.text;
+    if (this.#config.pi.transport === "tmux") {
+      const result = await this.#pool.prompt(
+        key, ownerUserId, promptText, hooks.onPiEvent, sharedConversation, message.userId,
+      );
+      return { type: "completed", result };
+    }
     const result = sharedConversation
       ? await this.#pool.prompt(
           key,
