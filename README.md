@@ -1,5 +1,7 @@
 # pi-slack-team
 
+[English guide](docs/guide.en.md) · [Український посібник](docs/guide.uk.md) · [Documentation & infographics / Документація та інфографіка](docs/README.md)
+
 Run one Slack app per Linux-isolated [Pi coding agent](https://github.com/earendil-works/pi). Two backends are supported: a persistent interactive **tmux team** and the legacy per-chat headless RPC runtime.
 
 ## tmux team (recommended for observable shared agents)
@@ -244,6 +246,9 @@ In `summary` mode, partial tool output remains hidden. The bridge recognizes onl
 
 | Field | Required | Default | Description |
 | --- | :---: | --- | --- |
+| `transport` | No | `rpc` | `rpc` per-user/thread histories or `tmux` shared agent history |
+| `tmuxCommand` | No | `/usr/local/bin/tmux` | Absolute tmux 3.5+ executable path for tmux transport |
+| `turnTimeoutMs` | No | `3600000` | tmux request deadline including queue time; 10 seconds–24 hours |
 | `command` | No | `/usr/bin/pi` | Absolute Pi executable path |
 | `cwd` | Yes | — | Agent working directory |
 | `agentDir` | Yes | — | Pi configuration/instructions directory |
@@ -254,6 +259,8 @@ In `summary` mode, partial tool output remains hidden. The bridge recognizes onl
 | `idleTimeoutMs` | No | `300000` | Stop an idle Pi subprocess while retaining its logical session |
 | `requestTimeoutMs` | No | `30000` | Pi RPC request timeout |
 | `autoSelect` | No | `[]` | Exact Pi UI select title/option standing authorizations, maximum 16 |
+
+In tmux mode, concurrency and resident-process limits are forced to `1`, idle hibernation is disabled, and startup allows at least 90 seconds. See the [transport comparison](docs/guide.en.md#3-choose-the-transport).
 
 Each `autoSelect` rule must match the complete dialog title and an option present in that request. Rules never match confirms, prefixes, or regular expressions. A match is answered before delegated-dialog cancellation, so treat every rule as pre-authorized execution under that Unix agent and keep the list narrowly scoped.
 
@@ -413,6 +420,10 @@ test/               unit and contract tests
 
 ## Documentation
 
+- [English project guide](docs/guide.en.md)
+- [Український посібник проєкту](docs/guide.uk.md)
+- [Bilingual documentation and infographics](docs/README.md)
+- [Persistent tmux team](docs/tmux-team.md)
 - [Runtime configuration examples](config/README.md)
 - [Slack app manifest examples](manifests/README.md)
 - [Agent roles](docs/roles.md)

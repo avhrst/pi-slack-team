@@ -1,5 +1,14 @@
 # Runtime configuration examples
 
+Choose the transport explicitly when adopting the shared tmux team:
+
+| Role | Shared tmux history | Per-user/thread RPC history |
+| --- | --- | --- |
+| Manager | [tmux-manager.example.yaml](tmux-manager.example.yaml) | [manager.example.yaml](manager.example.yaml) |
+| Worker | [tmux-worker.example.yaml](tmux-worker.example.yaml) | [worker.example.yaml](worker.example.yaml) |
+
+`pi.transport` defaults to `rpc`. tmux forces one process and one turn per agent and shares history across users. See the complete guide in [English](../docs/guide.en.md#5-configuration) or [українською](../docs/guide.uk.md#5-конфігурація).
+
 Use these generic public examples:
 
 - [`worker.example.yaml`](worker.example.yaml)

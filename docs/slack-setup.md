@@ -1,5 +1,7 @@
 # Slack app setup
 
+App creation, human-message events and credentials apply to both transports. Shared-channel bot delegation instructions and checks apply to RPC. tmux delegation uses a local relay and can originate in DMs; see [English](guide.en.md) / [українською](guide.uk.md) and [tmux team](tmux-team.md).
+
 Each runtime instance requires its own Slack app, bot token, app-level Socket Mode token, and immutable app ID. Do not reuse one Slack app across multiple Unix agents.
 
 ## 1. Choose a public manifest

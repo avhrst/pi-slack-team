@@ -1,5 +1,7 @@
 # One agent, one tmux session
 
+[English project guide](guide.en.md) · [Український посібник](guide.uk.md) · [Infographics / Інфографіка](README.md)
+
 The `pi.transport: tmux` backend keeps Slack as the human-facing interface, but replaces per-user/per-thread Pi RPC processes and Slack bot-to-bot delegation with **one interactive Pi process and one shared Pi history per agent**.
 
 ## Topology
@@ -82,7 +84,7 @@ Managers get `team_status` (live, bounded relay heartbeat) and `delegate_to_work
 
 ## Queue, UI and persistence contract
 
-- One Pi request executes at a time, including Slack and delegated work. Up to 128 bridge requests may wait. Arrival timestamps determine order, then IDs break ties.
+- One Pi request executes at a time, including Slack and delegated work. Up to 128 bridge requests may be admitted at once, including active work. Arrival timestamps determine order, then IDs break ties.
 - Local typed messages received during a remote turn wait separately (maximum 32) rather than contaminating the remote response. Idle local interaction remains available. Interactive operator access can still cancel/alter work; prefer read-only watching.
 - Shared history means **users are no longer context-isolated**. Use this mode only when that trade-off is accepted. Request metadata identifies the actual sender/channel/thread every turn. It does not grant permission to disclose another user's information.
 - Slack-origin work remains remote work after delegation. A message cannot gain local/TUI authorization by claiming it in its text.

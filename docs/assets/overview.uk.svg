@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1640" viewBox="0 0 1440 1640" xml:lang="uk" role="img" aria-labelledby="title description">
+  <title id="title">pi-slack-team — Одна команда. Два режими.</title>
+  <desc id="description">Архітектура tmux з’єднує Slack з окремими акаунтами менеджера й виконавця. Кожен має міст, послідовну чергу, приватний інтерактивний Pi та спільну історію JSONL. Relay від root передає задачі й результати за взаємними дозволами агентів, а для задач зі Slack перевіряє обидва allowlist людей. RPC натомість розділяє історію за користувачами DM і тредами каналів. Схема описує код, а не розгорнуту систему.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#536779"/></marker>
+  </defs>
+  <style>
+    text { font-family: 'DejaVu Sans', 'Arial', sans-serif; fill: #182f44; }
+    .eyebrow { font-size: 17px; font-weight: 700; letter-spacing: 1.7px; fill: #486479; }
+    .title { font-size: 51px; font-weight: 700; letter-spacing: -1.7px; }
+    .sub { font-size: 22px; fill: #486479; }
+    .heading { font-size: 29px; font-weight: 700; }
+    .body { font-size: 21px; }
+    .small { font-size: 17px; fill: #486479; }
+    .mono { font-family: 'DejaVu Sans Mono', 'Courier New', monospace; font-size: 20px; }
+    .flow { fill: none; stroke: #536779; stroke-width: 2; marker-end: url(#arrow); }
+  </style>
+  <rect width="1440" height="1640" fill="#f7f8fa"/>
+  <rect x="0" width="12" height="1640" fill="#126b70"/>
+
+<text x="64" y="55" class="eyebrow">PI-SLACK-TEAM / ОГЛЯД СИСТЕМИ</text>
+<text x="64" y="121" class="title" data-key="title">Одна команда. Два режими.</text>
+<text x="64" y="166" class="sub" data-key="subtitle">Slack — інтерфейс. Кожен агент Pi працює у власному Unix-акаунті.</text>
+<path d="M64 201H1376" stroke="#d7dfe5"/>
+<text x="64" y="240" class="eyebrow" data-key="section">01 / ПОСТІЙНА КОМАНДА TMUX</text>
+<text x="1376" y="240" class="small" text-anchor="end" data-key="host">ОДИН LINUX-ХОСТ · ПРИВАТНИЙ СОКЕТ НА АГЕНТА</text>
+<rect x="280" y="271" width="880" height="91" rx="12" fill="#e4eff1"/>
+<text x="720" y="307" class="heading" text-anchor="middle" data-key="human">Люди у Slack</text>
+<text x="720" y="340" class="small" text-anchor="middle" data-key="human_sub">Дозволені DM і повідомлення каналів · кожен застосунок перевіряє свою роль</text>
+<path d="M496 362 V384 H278 V407" class="flow"/>
+<path d="M944 362 V384 H1162 V407" class="flow"/>
+<rect x="64" y="410" width="428" height="435" rx="18" fill="#ffffff" stroke="#c6d4df" stroke-width="1.5"/>
+<rect x="64" y="410" width="428" height="9" rx="4" fill="#126b70"/>
+<text x="88" y="458" class="heading" data-key="manager">Менеджер</text>
+<text x="468" y="457" class="small" text-anchor="end" data-key="account_a">Unix-акаунт A</text>
+<text x="88" y="488" class="small" data-key="manager_role">Координує й делегує</text>
+<path d="M88 505H468" stroke="#d7dfe5"/>
+<text x="88" y="539" class="body" data-key="bridge">Окремий Slack app + міст</text>
+<text x="88" y="567" class="small" data-key="checks">Ідентичність → allowlist → дедуплікація</text>
+<path d="M278 580 V602" class="flow"/>
+<rect x="88" y="615" width="380" height="92" rx="10" fill="#e7f1f0"/>
+<text x="278" y="649" class="body" text-anchor="middle" data-key="queue">Один запит за раз</text>
+<text x="278" y="681" class="small" text-anchor="middle" data-key="pi">Інтерактивний Pi у приватному tmux</text>
+<path d="M278 716 V742" class="flow"/>
+<text x="278" y="776" class="body" text-anchor="middle" data-key="history">Одна спільна історія JSONL</text>
+<text x="278" y="810" class="mono" text-anchor="middle" data-key="history_file">tmux-agent.jsonl</text>
+<rect x="948" y="410" width="428" height="435" rx="18" fill="#ffffff" stroke="#c6d4df" stroke-width="1.5"/>
+<rect x="948" y="410" width="428" height="9" rx="4" fill="#126b70"/>
+<text x="972" y="458" class="heading" data-key="worker">Виконавець</text>
+<text x="1352" y="457" class="small" text-anchor="end" data-key="account_b">Unix-акаунт B</text>
+<text x="972" y="488" class="small" data-key="worker_role">Виконує спеціалізовані задачі</text>
+<path d="M972 505H1352" stroke="#d7dfe5"/>
+<text x="972" y="539" class="body" data-key="bridge">Окремий Slack app + міст</text>
+<text x="972" y="567" class="small" data-key="checks">Ідентичність → allowlist → дедуплікація</text>
+<path d="M1162 580 V602" class="flow"/>
+<rect x="972" y="615" width="380" height="92" rx="10" fill="#e7f1f0"/>
+<text x="1162" y="649" class="body" text-anchor="middle" data-key="queue">Один запит за раз</text>
+<text x="1162" y="681" class="small" text-anchor="middle" data-key="pi">Інтерактивний Pi у приватному tmux</text>
+<path d="M1162 716 V742" class="flow"/>
+<text x="1162" y="776" class="body" text-anchor="middle" data-key="history">Одна спільна історія JSONL</text>
+<text x="1162" y="810" class="mono" text-anchor="middle" data-key="history_file">tmux-agent.jsonl</text>
+<rect x="540" y="479" width="360" height="262" rx="18" fill="#eeedf6"/>
+<text x="720" y="520" class="heading" text-anchor="middle" data-key="relay">Локальний relay</text>
+<text x="720" y="550" class="small" text-anchor="middle" data-key="root">Працює від root</text>
+<text x="720" y="590" class="body" text-anchor="middle" data-key="acl">Взаємні дозволи агентів</text>
+<text x="720" y="624" class="body" text-anchor="middle" data-key="allowlists">Обидва allowlist людей*</text>
+<text x="720" y="658" class="body" text-anchor="middle" data-key="buffers">Обмежені JSON-буфери</text>
+<text x="720" y="702" class="mono" text-anchor="middle">load-buffer / wait-for</text>
+<path d="M492 627 H537" class="flow"/>
+<path d="M900 627 H945" class="flow"/>
+<path d="M540 695 H495" class="flow"/>
+<path d="M948 695 H903" class="flow"/>
+<text x="720" y="454" class="small" text-anchor="middle" data-key="task">задача →</text>
+<text x="720" y="773" class="small" text-anchor="middle" data-key="result">← результат</text>
+<text x="64" y="879" class="small" data-key="footnote">* Для делегування зі Slack. Локальні запити TUI зберігають локальне походження.</text>
+<text x="64" y="910" class="small" data-key="return">Результат виконавця повертається в інструмент менеджера, що очікує, далі — у вихідну розмову Slack.</text>
+<rect x="64" y="947" width="1312" height="111" rx="12" fill="#f6eacb"/>
+<text x="88" y="990" class="heading" data-key="boundary">Спільна історія ≠ ізоляція користувачів</text>
+<text x="88" y="1026" class="small" data-key="boundary_sub">tmux ділить контекст між людьми й тредами. Метадані поточного відправника визначають авторизацію.</text>
+<text x="64" y="1107" class="eyebrow" data-key="compare">02 / ОБЕРІТЬ МЕЖУ КОНТЕКСТУ</text>
+<text x="64" y="1157" class="heading" style="fill:#126b70">tmux</text>
+<text x="196" y="1155" class="small" data-key="tmux_sub">Вмикається явно</text>
+<circle cx="69" cy="1188" r="4" fill="#126b70"/>
+<text x="87" y="1195" class="body" data-key="t1">1 постійний процес Pi / агент</text>
+<circle cx="69" cy="1227" r="4" fill="#126b70"/>
+<text x="87" y="1234" class="body" data-key="t2">1 спільна історія / агент</text>
+<circle cx="69" cy="1266" r="4" fill="#126b70"/>
+<text x="87" y="1273" class="body" data-key="t3">Послідовні запити; Pi не засинає</text>
+<circle cx="69" cy="1305" r="4" fill="#126b70"/>
+<text x="87" y="1312" class="body" data-key="t4">Делегування: DM, канал або локальний TUI</text>
+<text x="744" y="1157" class="heading" style="fill:#574d83">RPC</text>
+<text x="876" y="1155" class="small" data-key="rpc_sub">Типовий транспорт</text>
+<circle cx="749" cy="1188" r="4" fill="#574d83"/>
+<text x="767" y="1195" class="body" data-key="r1">Процес Pi / активна логічна сесія</text>
+<circle cx="749" cy="1227" r="4" fill="#574d83"/>
+<text x="767" y="1234" class="body" data-key="r2">Історія / користувач DM або тред каналу</text>
+<circle cx="749" cy="1266" r="4" fill="#574d83"/>
+<text x="767" y="1273" class="body" data-key="r3">Типово 4 паралельні запити; зупинка у простої</text>
+<circle cx="749" cy="1305" r="4" fill="#574d83"/>
+<text x="767" y="1312" class="body" data-key="r4">Делегування: лише спільний канал Slack</text>
+<path d="M64 1341H1376" stroke="#d7dfe5"/>
+<text x="64" y="1382" class="eyebrow" data-key="operator">03 / СПОСТЕРІГАЙТЕ РЕАЛЬНОГО АГЕНТА</text>
+<text x="64" y="1424" class="mono">pi-team list</text>
+<text x="64" y="1455" class="small" data-key="list">Статус команди</text>
+<text x="510" y="1424" class="mono">pi-team watch &lt;agent&gt;</text>
+<text x="510" y="1455" class="small" data-key="watch">Лише перегляд термінала</text>
+<text x="966" y="1424" class="mono">pi-team attach &lt;agent&gt;</text>
+<text x="966" y="1455" class="small" data-key="attach">Інтерактивний доступ</text>
+<text x="64" y="1520" class="small" data-key="restart">JSONL переживає перезапуск. Активна робота не повторюється непомітно; виконані дії не скасовуються.</text>
+<path d="M64 1550H1376" stroke="#d7dfe5"/>
+<text x="64" y="1593" class="small" data-key="footer">Огляд за кодом · v0.1.0 · f01d764 · 2026-09-12 · Повний опис: docs/guide.uk.md</text>
+<text x="1376" y="1593" class="eyebrow" text-anchor="end">UK</text>
+</svg>

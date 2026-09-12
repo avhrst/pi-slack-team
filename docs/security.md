@@ -1,5 +1,11 @@
 # Security model
 
+## Transport scope
+
+The IPC and Slack bot-envelope delegation details below describe RPC. In `pi.transport: tmux`, each agent has one shared Pi history across users and threads. A root-run local relay transfers bounded buffers between fixed private sockets; reciprocal peer configuration and both human allowlists authorize Slack-origin delegation. Ordinary Slack bot delegation envelopes are rejected in tmux mode. Direct Slack UI dialogs belong to the current request sender; delegated dialogs cancel unless an exact automatic-selection rule applies. Terminal observers can see sensitive output and thinking that Slack does not receive.
+
+Read the complete comparison in [English](guide.en.md#9-security-boundaries-and-limitations) / [українською](guide.uk.md#9-межі-безпеки-та-обмеження), and the [tmux contract](tmux-team.md).
+
 ## Trust boundaries
 
 Slack is a remote command surface for a coding agent. An authorized Slack user can cause the agent to read files, invoke tools, or change state within the Unix account's permissions.

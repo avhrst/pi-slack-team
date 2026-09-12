@@ -1,5 +1,9 @@
 # Operations
 
+This reference primarily describes RPC operations, including Slack-based delegation and the earlier per-user/thread session migration. For both transports, use the guide in [English](guide.en.md#6-install-and-start) / [українською](guide.uk.md#6-встановлення-й-запуск). For tmux migration and rollback, use [tmux team](tmux-team.md#deployment-and-rollback).
+
+In tmux mode, an idle Pi process stays running: inspect `pi-team list` and active requests before maintenance, rather than requiring no Pi process. Delegation uses the local relay and does not require a shared Slack channel. Rolling back RPC → tmux requires the backed-up SQLite state as well as the prior release/configuration.
+
 ## Per-agent files
 
 Recommended production layout:

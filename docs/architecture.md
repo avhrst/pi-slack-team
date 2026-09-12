@@ -1,4 +1,6 @@
-# Architecture
+# RPC architecture
+
+This reference describes `pi.transport: rpc`, the default transport. The opt-in tmux backend uses one persistent interactive Pi process and shared history per agent, with local relay delegation. See the [tmux contract](tmux-team.md) and the current comparison in [English](guide.en.md#3-choose-the-transport) / [українською](guide.uk.md#3-вибір-транспорту).
 
 ## Decision
 

@@ -1,5 +1,7 @@
 # Agent roles
 
+The human-message role policy applies to both transports. Slack bot-envelope delegation below applies only to RPC; tmux uses the local relay instead and rejects those bot envelopes. See the full guide in [English](guide.en.md) / [українською](guide.uk.md).
+
 `pi-slack-team` supports two runtime roles. The role controls which Slack events may create a Pi turn; it does not change the Linux identity, Pi model, tools, or agent instructions.
 
 ```yaml
