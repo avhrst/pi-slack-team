@@ -133,15 +133,15 @@ export class TmuxAgentRunner {
           onEvent?.({ type: "agent_start" });
         }
         if (names.includes(bufferName("events", request.id))) {
-          const progress = await this.mailbox.read(bufferName("events", request.id)) as { events?: Array<{ sequence: number; event: RpcRecord }> };
-          for (const item of progress.events ?? []) {
+          const progress = await this.mailbox.readIfPresent(bufferName("events", request.id)) as { events?: Array<{ sequence: number; event: RpcRecord }> } | undefined;
+          for (const item of progress?.events ?? []) {
             if (item.sequence > lastSequence) { onEvent?.(item.event); lastSequence = item.sequence; }
           }
         }
         if (conversation) for (const name of names.filter((name) => /^pst-ui-[0-9a-f-]{36}$/.test(name))) {
           if (dialogs.has(name)) continue;
-          const ui = await this.mailbox.read(name) as RpcRecord & { runId?: string; id?: string };
-          if (ui.runId !== request.id || typeof ui.id !== "string") continue;
+          const ui = await this.mailbox.readIfPresent(name) as (RpcRecord & { runId?: string; id?: string }) | undefined;
+          if (!ui || ui.runId !== request.id || typeof ui.id !== "string") continue;
           const dialogController = new AbortController();
           const promise = this.uiHandler({
             conversation, request: ui, signal: AbortSignal.any([signal, dialogController.signal]),
@@ -152,7 +152,9 @@ export class TmuxAgentRunner {
         }
         for (const [name, dialog] of dialogs) if (!names.includes(name)) dialog.controller.abort();
         if (names.includes(bufferName("done", request.id))) {
-          const result = runResultSchema.parse(await this.mailbox.read(bufferName("done", request.id)));
+          const value = await this.mailbox.readIfPresent(bufferName("done", request.id));
+          if (value === undefined) continue;
+          const result = runResultSchema.parse(value);
           if (result.id !== request.id) throw new Error("Mismatched tmux result");
           completed = true;
           if (!result.ok) throw new Error(result.text);
@@ -179,7 +181,9 @@ export class TmuxAgentRunner {
       const names = await this.mailbox.list("pst-peer-in-");
       for (const name of names.slice(0, 128)) {
         if (this.#peers.has(name)) continue;
-        const parsed = peerRequestSchema.safeParse(await this.mailbox.read(name));
+        const value = await this.mailbox.readIfPresent(name);
+        if (value === undefined) continue;
+        const parsed = peerRequestSchema.safeParse(value);
         if (!parsed.success || name !== bufferName("peer-in", `${parsed.data.from}-${parsed.data.id}`)) {
           await this.mailbox.remove(name);
           continue;

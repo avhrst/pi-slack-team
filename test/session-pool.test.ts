@@ -107,6 +107,24 @@ class DialogExitClient extends FakeClient {
   }
 }
 
+class AssistantOutcomeClient extends FakeClient {
+  constructor(options: RpcClientOptions, readonly outcomes: Array<Record<string, unknown>>) {
+    super(options);
+  }
+
+  override async request(command: Record<string, unknown>): Promise<RpcRecord> {
+    if (command.type !== "prompt") return super.request(command);
+    this.requests.push(command as RpcRecord);
+    queueMicrotask(() => {
+      for (const outcome of this.outcomes) {
+        this.emit("event", { type: "message_end", message: { role: "assistant", content: [], ...outcome } });
+      }
+      this.emit("event", { type: "agent_settled" });
+    });
+    return { type: "response", success: true };
+  }
+}
+
 const temporaryDirectories: string[] = [];
 
 function setup(
@@ -171,6 +189,59 @@ afterEach(() => {
 });
 
 describe("PiSessionPool", () => {
+  it.each(["error", "aborted"])("rejects a final %s outcome and allows the next turn to resume", async (stopReason) => {
+    const { config, registry, logger } = setup();
+    const clients: AssistantOutcomeClient[] = [];
+    const pool = new PiSessionPool(config, registry, logger, undefined, (options) => {
+      const client = new AssistantOutcomeClient(options, clients.length
+        ? [{ stopReason: "stop" }]
+        : [{ stopReason, errorMessage: "Provider failed or turn was aborted" }]);
+      clients.push(client);
+      return client;
+    });
+    try {
+      await expect(pool.prompt(key, "U01", "failed task")).rejects.toThrow("Provider failed or turn was aborted");
+      expect(registry.getConversation(key)?.status).toBe("error");
+      expect(clients[0]?.running).toBe(false);
+      expect(clients[0]?.requests.some(request => request.type === "get_last_assistant_text")).toBe(false);
+      await expect(pool.prompt(key, "U01", "next task")).resolves.toMatchObject({ text: "final response" });
+      expect(clients[1]?.options.sessionFile).toBe("/tmp/new-session.jsonl");
+    } finally {
+      await pool.shutdown();
+      registry.close();
+    }
+  });
+
+  it("accepts recovery after a retry and ignores non-assistant message outcomes", async () => {
+    const { config, registry, logger } = setup();
+    const pool = new PiSessionPool(config, registry, logger, undefined, (options) => new AssistantOutcomeClient(options, [
+      { stopReason: "error", errorMessage: "Transient error" },
+      { role: "toolResult", stopReason: "stop" },
+      { stopReason: "stop" },
+    ]));
+    try {
+      await expect(pool.prompt(key, "U01", "retried task")).resolves.toMatchObject({ text: "final response" });
+      expect(registry.getConversation(key)?.status).toBe("idle");
+    } finally {
+      await pool.shutdown();
+      registry.close();
+    }
+  });
+
+  it("uses a fallback error when the failed assistant has no error message", async () => {
+    const { config, registry, logger } = setup();
+    const pool = new PiSessionPool(config, registry, logger, undefined, (options) => new AssistantOutcomeClient(options, [
+      { stopReason: "error", errorMessage: "" },
+      { role: "toolResult", stopReason: "stop" },
+    ]));
+    try {
+      await expect(pool.prompt(key, "U01", "failed task")).rejects.toThrow("Pi turn failed or was aborted");
+    } finally {
+      await pool.shutdown();
+      registry.close();
+    }
+  });
+
   it("persists new session metadata and reuses the active client", async () => {
     const { clients, pool, registry } = setup();
     await expect(pool.prompt(key, "U01", "first")).resolves.toMatchObject({

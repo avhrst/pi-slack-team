@@ -18,13 +18,14 @@ import tmuxAgent from "../src/tmux/agent-extension.js";
 import { TmuxRelay, authorizeRelay } from "../src/tmux/relay.js";
 import { workerRunId, type Delegation, type RunRequest } from "../src/tmux/protocol.js";
 
-const tmux = ["/usr/local/bin/tmux", "/usr/bin/tmux"].find((file) => fs.existsSync(file));
+const tmux = ["/usr/local/bin/tmux", "/usr/bin/tmux", "/opt/homebrew/bin/tmux"].find((file) => fs.existsSync(file));
 const available = Boolean(tmux && spawnSync(tmux, ["-V"]).status === 0);
 const cleanup: Array<() => Promise<void> | void> = [];
 const logger = createLogger(() => undefined);
 
 afterEach(async () => {
   for (const dispose of cleanup.splice(0).reverse()) await dispose();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -41,7 +42,7 @@ function config(role: "worker" | "manager" = "worker", id = role): AgentConfig {
 
 async function server(cfg: AgentConfig) {
   const mailbox = new TmuxMailbox(cfg.pi.tmuxCommand, tmuxSocketPath(cfg));
-  await mailbox.exec(["-f", "/dev/null", "new-session", "-d", "-s", cfg.expectedUnixUser, "/usr/bin/sleep", "600"]);
+  await mailbox.exec(["-f", "/dev/null", "new-session", "-d", "-s", cfg.expectedUnixUser, "/bin/sleep", "600"]);
   cleanup.push(async () => { await mailbox.exec(["kill-server"]).catch(() => undefined); });
   await mailbox.exec(["set-option", "-t", cfg.expectedUnixUser, "@pi-team-agent", cfg.agentId]);
   return mailbox;
@@ -168,6 +169,33 @@ describe("tmux configuration and relay policy", () => {
 });
 
 describe.skipIf(!available)("real tmux mailbox integration", () => {
+  it("keeps the peer receiver healthy if relay cleanup removes a listed inbox", async () => {
+    const cfg = config();
+    const agent = await fakeAgent(cfg, async () => "next-result");
+    const registry = new Registry(path.join(cfg.stateDir, "state.sqlite"));
+    cleanup.push(() => registry.close());
+    const runner = new TmuxAgentRunner(cfg, agent.configPath, registry, logger);
+    cleanup.push(() => runner.shutdown());
+    const read = runner.mailbox.read.bind(runner.mailbox);
+    const request = delegation(cfg);
+    const inbox = bufferName("peer-in", `manager-${request.id}`);
+    let removed = false;
+    vi.spyOn(runner.mailbox, "read").mockImplementation(async name => {
+      if (name === inbox) {
+        await agent.mailbox.remove(name);
+        removed = true;
+      }
+      return read(name);
+    });
+    await runner.start();
+    await agent.mailbox.put(inbox, { ...request, from: "manager" });
+    await until(async () => removed);
+    await expect(runner.prompt({
+      teamId: "TTEST", appId: "AWORKER", channelId: "DALICE", threadTs: "1.0",
+    }, "UALICE", "next-task")).resolves.toMatchObject({ text: "next-result" });
+    await expect(runner.health()).resolves.toMatchObject({ agentId: cfg.agentId });
+  }, 20_000);
+
   it("round-trips Unicode/multiline data without executing shell syntax; bounds input", async () => {
     const cfg = config();
     const box = await server(cfg);

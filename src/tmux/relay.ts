@@ -60,7 +60,9 @@ export class TmuxRelay {
       catch { continue; /* offline agent, no request to relay */ }
       for (const name of names.slice(0, 128)) {
         try {
-          const parsed = delegationSchema.safeParse(await sourceBox.read(name));
+          const value = await sourceBox.readIfPresent(name);
+          if (value === undefined) continue;
+          const parsed = delegationSchema.safeParse(value);
           if (!parsed.success || name !== bufferName("out-request", parsed.data.id)) {
             await sourceBox.remove(name);
             this.logger.warn("tmux_relay_rejected", { agentId: source.agentId, reason: "invalid-envelope" });

@@ -59,6 +59,18 @@ export class TmuxMailbox {
     return JSON.parse(await this.exec(["save-buffer", "-b", name, "-"]));
   }
 
+  async readIfPresent(name: string): Promise<unknown | undefined> {
+    this.#validateName(name);
+    try {
+      return await this.read(name);
+    } catch (error) {
+      // A producer/caller may remove a buffer after list(). Recheck on the live
+      // server so missing buffers are harmless without hiding transport/JSON errors.
+      if ((await this.list(name)).includes(name)) throw error;
+      return undefined;
+    }
+  }
+
   async put(name: string, value: unknown, wake = true): Promise<void> {
     this.#validateName(name);
     const text = JSON.stringify(value);

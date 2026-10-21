@@ -141,7 +141,17 @@ export class PiSessionPool {
         handle.busy = true;
         this.#registry.setStatus(key, "running");
 
+        let turnError: Error | undefined;
         const eventListener = (event: RpcRecord) => {
+          if (event.type === "message_end" && event.message && typeof event.message === "object") {
+            const message = event.message as Record<string, unknown>;
+            if (message.role === "assistant") {
+              turnError = message.stopReason === "error" || message.stopReason === "aborted"
+                ? new Error(typeof message.errorMessage === "string" && message.errorMessage.trim()
+                    ? message.errorMessage : "Pi turn failed or was aborted.")
+                : undefined;
+            }
+          }
           onEvent?.(event);
           if (event.type === "extension_ui_request") {
             void this.#handleUiRequest(conversation, handle.client, event);
@@ -157,6 +167,8 @@ export class PiSessionPool {
           } finally {
             settled.cancel();
           }
+          // Retry errors are provisional until the final assistant message settles.
+          if (turnError) throw turnError;
 
           const lastMessage = await handle.client.request({
             type: "get_last_assistant_text",

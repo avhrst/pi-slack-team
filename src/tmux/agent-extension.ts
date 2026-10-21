@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
+import { AgentSession, type ExtensionAPI, type ExtensionContext, type ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadConfig } from "../config/load-config.js";
 import { matchAutomaticSelect } from "../pi/ui-policy.js";
@@ -19,12 +19,15 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
   const receipts = path.join(config.stateDir, "tmux-receipts");
   let context: ExtensionContext;
   let active: RunRequest | undefined;
+  let activePrompt: string | undefined;
+  let completion: Promise<void> | undefined;
   let lastText = "";
   let lastError: string | undefined;
   let cancelled = false;
   let controller = new AbortController();
   let loop: Promise<void> | undefined;
   let restoreUi: (() => void) | undefined;
+  let restoreSender: (() => void) | undefined;
   let events: Array<{ sequence: number; event: RpcRecord }> = [];
   let sequence = 0;
   let dirty = false;
@@ -60,6 +63,16 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
     await mailbox.remove(bufferName("cancel", request.id));
   };
 
+  const finishActive = async (request: RunRequest, ok: boolean, text: string) => {
+    if (active !== request) return;
+    completion ??= finish(request, ok, text).then(() => {
+      active = undefined;
+      activePrompt = undefined;
+      context.ui.setStatus("tmux-team", `${config.agentId} · idle · shared agent`);
+    });
+    await completion;
+  };
+
   const remoteDialog = async (request: RpcRecord, opts?: ExtensionUIDialogOptions) => {
     const run = active;
     if (!run) return { cancelled: true };
@@ -76,7 +89,8 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
       while (!signal.aborted && Date.now() < deadline && active === run) {
         const names = await mailbox.list(bufferName("ui-reply", id));
         if (names.includes(bufferName("ui-reply", id))) {
-          return await mailbox.read(bufferName("ui-reply", id)) as Record<string, unknown>;
+          const response = await mailbox.readIfPresent(bufferName("ui-reply", id));
+          if (response !== undefined) return response as Record<string, unknown>;
         }
         await mailbox.wait(signal, 500);
       }
@@ -91,6 +105,25 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
     if (ctx.mode !== "tui") throw new Error("tmux team requires interactive Pi");
     context = ctx;
     controller = new AbortController();
+    // ExtensionAPI.sendUserMessage is fire-and-forget in the pinned Pi SDK.
+    // Observe its public async session method, scoped to our exact prompt/session,
+    // to catch preflight failures (or handled input) that never emit agent_settled.
+    const originalSender = AgentSession.prototype.sendUserMessage;
+    const managedSender: typeof originalSender = async function (this: AgentSession, content, options) {
+      const request = active && content === activePrompt && this.sessionFile === metadata().sessionFile ? active : undefined;
+      try {
+        await originalSender.call(this, content, options);
+      } catch (error) {
+        if (request) await finishActive(request, false,
+          error instanceof Error ? error.message : "Pi could not start the request.");
+        throw error; // Preserve Pi's normal extension error reporting in the TUI.
+      }
+      if (request) await finishActive(request, false, "Pi handled the request without starting an agent turn.");
+    };
+    AgentSession.prototype.sendUserMessage = managedSender;
+    restoreSender = () => {
+      if (AgentSession.prototype.sendUserMessage === managedSender) AgentSession.prototype.sendUserMessage = originalSender;
+    };
     fs.mkdirSync(receipts, { recursive: true, mode: 0o700 });
     // Requests expire within one day; older receipts cannot authorize a replay.
     for (const file of fs.readdirSync(receipts)) {
@@ -153,21 +186,24 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
         await mailbox.pruneExpired(Date.now() - 2 * 86_400_000);
       }
       const names = await mailbox.list();
-      if (active) {
-        if (names.includes(bufferName("cancel", active.id)) || Date.now() >= active.expiresAt) {
+      const request = active;
+      if (request) {
+        if (names.includes(bufferName("cancel", request.id)) || Date.now() >= request.expiresAt) {
           cancelled = true;
           lastError = "Request cancelled or timed out; already executed actions are not undone.";
           context.abort();
         }
         if (dirty) {
           dirty = false;
-          await mailbox.put(bufferName("events", active.id), { events }, false);
+          await mailbox.put(bufferName("events", request.id), { events }, false);
         }
       } else if (context.isIdle() && !context.hasPendingMessages()) {
         const queued = names.filter((name) => name.startsWith("pst-run-"));
         const requests: RunRequest[] = [];
         for (const name of queued.slice(0, 128)) {
-          const parsed = runRequestSchema.safeParse(await mailbox.read(name));
+          const value = await mailbox.readIfPresent(name);
+          if (value === undefined) continue;
+          const parsed = runRequestSchema.safeParse(value);
           if (!parsed.success || name !== bufferName("run", parsed.data.id)) {
             await mailbox.remove(name);
           } else requests.push(parsed.data);
@@ -195,6 +231,8 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
     }
     fs.writeFileSync(receiptPath, JSON.stringify({ id: request.id, startedAt: Date.now() }), { flag: "wx", mode: 0o600 });
     active = request;
+    activePrompt = requestPrompt(request);
+    completion = undefined;
     lastText = "";
     lastError = undefined;
     cancelled = false;
@@ -202,10 +240,9 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
     sequence = 0;
     context.ui.setStatus("tmux-team", `${config.agentId} · ${request.fromAgent ?? request.origin.kind} · ${request.id.slice(0, 8)}`);
     await mailbox.put(bufferName("accepted", request.id), { id: request.id, instanceId });
-    try { pi.sendUserMessage(requestPrompt(request)); }
+    try { pi.sendUserMessage(activePrompt); }
     catch {
-      await finish(request, false, "Pi could not start the request.");
-      active = undefined;
+      await finishActive(request, false, "Pi could not start the request.");
     }
   }
 
@@ -239,9 +276,7 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
   pi.on("agent_settled", async () => {
     const request = active;
     if (!request) return;
-    await finish(request, !lastError, lastError ?? (lastText.trim() || "Pi completed without a text response."));
-    active = undefined;
-    context.ui.setStatus("tmux-team", `${config.agentId} · idle · shared agent`);
+    await finishActive(request, !lastError, lastError ?? (lastText.trim() || "Pi completed without a text response."));
   });
   const noSwitch = () => {
     context.ui.notify("Managed agent uses one persistent session. Session switching/forking is disabled.", "warning");
@@ -253,9 +288,11 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     controller.abort();
     await loop?.catch(() => undefined);
-    if (active) await finish(active, false, "Agent stopped; interrupted work was not replayed.").catch(() => undefined);
+    if (active) await finishActive(active, false, "Agent stopped; interrupted work was not replayed.").catch(() => undefined);
     active = undefined;
+    activePrompt = undefined;
     restoreUi?.();
+    restoreSender?.();
     await mailbox.remove("pst-ready");
   });
 
