@@ -12,6 +12,10 @@ slack:
     - U0000000000
   # summary hides tool arguments/output; raw exposes them in the Slack conversation.
   progressMode: summary
+  # Requires the files:read scope included in manifests/support-agent.yaml.
+  fileUploads: true
+  maxFileBytes: 20971520
+  maxFilesPerMessage: 5
 
 interAgent:
   peers:

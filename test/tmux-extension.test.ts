@@ -186,3 +186,18 @@ describe("optional tmux buffer reads", () => {
     await expect(box.readIfPresent("pst-test")).rejects.toBeInstanceOf(SyntaxError);
   });
 });
+
+
+it("does not publish readiness when an explicitly configured model is unavailable", async () => {
+  const root = setup();
+  const file = path.join(root, "config.json");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  config.pi.provider = "not-a-provider";
+  config.pi.model = "missing-model";
+  config.pi.thinkingLevel = "high";
+  fs.writeFileSync(file, JSON.stringify(config));
+  const buffers = memoryMailbox();
+  const { errors } = await sdkAgent(root);
+  expect(errors.some(item => item.error.includes("Configured Pi model is unavailable"))).toBe(true);
+  expect(buffers.has("pst-ready")).toBe(false);
+});

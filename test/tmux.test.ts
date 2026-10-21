@@ -114,6 +114,29 @@ function delegation(target: AgentConfig): Delegation {
 }
 
 describe("tmux configuration and relay policy", () => {
+  it("signals timed-out and aborted waits instead of accumulating killed tmux waiters", async () => {
+    vi.useFakeTimers();
+    try {
+      const mailbox = new TmuxMailbox("/unused", "/unused");
+      let release: (() => void) | undefined;
+      const exec = vi.spyOn(mailbox, "exec").mockImplementation(async (args) => {
+        if (args[1] === "-S") { release?.(); return ""; }
+        return new Promise<string>((resolve) => { release = () => resolve(""); });
+      });
+      const controller = new AbortController();
+      const timed = mailbox.wait(controller.signal, 100);
+      await vi.advanceTimersByTimeAsync(100);
+      await timed;
+      expect(exec).toHaveBeenCalledWith(["wait-for", "pst-wake"], undefined, 5_100);
+      expect(exec).toHaveBeenCalledWith(["wait-for", "-S", "pst-wake"]);
+      exec.mockClear();
+      const cancelled = mailbox.wait(controller.signal, 1_000);
+      controller.abort();
+      await cancelled;
+      expect(exec).toHaveBeenCalledWith(["wait-for", "-S", "pst-wake"]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("forces one resident process/turn while keeping legacy RPC defaults", () => {
     const cfg = config();
     expect(cfg.pi.maxConcurrentTurns).toBe(1);
@@ -195,6 +218,24 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     }, "UALICE", "next-task")).resolves.toMatchObject({ text: "next-result" });
     await expect(runner.health()).resolves.toMatchObject({ agentId: cfg.agentId });
   }, 20_000);
+  it("flushes public commentary on fast turns and preserves it across tool bursts", async () => {
+    const cfg = config();
+    const agent = await fakeAgent(cfg, async () => {
+      await agent.emit("message_end", { message: { role: "assistant", stopReason: "toolUse", content: [
+        { type: "thinking", thinking: "PRIVATE_THINKING" },
+        { type: "text", text: "Перевіряю налаштування, щоб знайти причину збою." },
+        { type: "toolCall", name: "read", arguments: { path: "private-path" } },
+      ] } });
+      for (let i = 0; i < 80; i++) await agent.emit("tool_execution_update", { type: "tool_execution_update", toolCallId: "read-1", toolName: "read", partialResult: { content: [{ type: "text", text: `trace ${i}` }] } });
+      return "FINAL_RESULT";
+    });
+    const id = crypto.randomUUID();
+    await agent.mailbox.put(bufferName("run", id), { id, text: "task", origin: { kind: "local" }, createdAt: Date.now(), expiresAt: Date.now() + 30_000 });
+    await until(async () => (await agent.mailbox.list()).includes(bufferName("done", id)));
+    const snapshot = await agent.mailbox.read(bufferName("events", id));
+    expect(JSON.stringify(snapshot)).toContain("Перевіряю налаштування");
+    expect(JSON.stringify(snapshot)).not.toMatch(/PRIVATE_THINKING|FINAL_RESULT|private-path/);
+  });
 
   it("round-trips Unicode/multiline data without executing shell syntax; bounds input", async () => {
     const cfg = config();
@@ -295,14 +336,23 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     const manager = config("manager");
     const worker = config();
     const managerAgent = await fakeAgent(manager);
-    const workerAgent = await fakeAgent(worker, async () => "worker-result");
+    const workerAgent = await fakeAgent(worker, async () => {
+      await workerAgent.emit("message_end", { message: { role: "assistant", stopReason: "toolUse", content: [
+        { type: "text", text: "Перевіряю потрібні матеріали; змін поки не вносив." },
+        { type: "thinking", thinking: "PRIVATE_THINKING" },
+        { type: "toolCall", name: "read", arguments: { path: "PRIVATE_PATH" } },
+      ] } });
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      return "worker-result";
+    });
     const registry = new Registry(path.join(worker.stateDir, "state.sqlite"));
     cleanup.push(() => registry.close());
     const runner = new TmuxAgentRunner(worker, workerAgent.configPath, registry, logger);
     await runner.start();
     cleanup.push(() => runner.shutdown());
     const tool = managerAgent.tools.get("delegate_to_worker")!;
-    const result = tool.execute("tool-1", { workerId: "worker", task: "test delegated task" }, new AbortController().signal);
+    const updates: unknown[] = [];
+    const result = tool.execute("tool-1", { workerId: "worker", task: "test delegated task" }, new AbortController().signal, (update) => updates.push(update));
     // Observe errors immediately, even if an assertion below fails.
     void result.catch(() => undefined);
     await until(async () => (await managerAgent.mailbox.list("pst-out-request-")).length === 1);
@@ -313,6 +363,8 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     const restarted = new TmuxRelay([manager, worker], logger);
     await until(async () => { await restarted.tick(); return (await managerAgent.mailbox.list("pst-out-request-")).length === 0; });
     expect((await result).content[0]?.text).toBe("worker-result");
+    expect(JSON.stringify(updates)).toContain("Перевіряю потрібні матеріали");
+    expect(JSON.stringify(updates)).not.toMatch(/PRIVATE_THINKING|PRIVATE_PATH/);
     expect(workerAgent.calls).toHaveLength(1);
     expect(workerAgent.calls[0]).toContain("Delegated by trusted configured agent: manager");
   }, 20_000);

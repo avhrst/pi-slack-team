@@ -16,8 +16,8 @@ interface QueuedProgressUpdate {
 }
 
 /**
- * Serializes Slack progress updates and permanently degrades a raw transcript
- * to the compact summary transcript when Slack rejects a detailed payload.
+ * Serializes Slack progress updates and degrades richer modes to summary if
+ * Slack rejects a payload. Identical rendered updates are never reposted.
  */
 export class SlackProgressReporter {
   readonly #configuredTranscript: PiProgressTranscript;
@@ -28,6 +28,8 @@ export class SlackProgressReporter {
     attempt: ProgressUpdateAttempt,
   ) => void;
   readonly #updateTimeoutMs: number;
+  readonly #intervalMs: number;
+  #lastRenderedText: string | undefined;
   #timer: NodeJS.Timeout | undefined;
   #lastUpdateAt = 0;
   #queuedUpdate: QueuedProgressUpdate | undefined;
@@ -46,12 +48,13 @@ export class SlackProgressReporter {
     updateTimeoutMs = SLACK_PROGRESS_UPDATE_TIMEOUT_MS,
   ) {
     this.#configuredTranscript = new PiProgressTranscript(mode);
-    this.#summaryTranscript = mode === "raw"
+    this.#summaryTranscript = mode !== "summary"
       ? new PiProgressTranscript("summary")
       : undefined;
     this.#update = update;
     this.#onError = onError;
     this.#updateTimeoutMs = updateTimeoutMs;
+    this.#intervalMs = mode === "balanced" ? 3_000 : SLACK_PROGRESS_INTERVAL_MS;
   }
 
   record(event: RpcRecord): void {
@@ -73,6 +76,13 @@ export class SlackProgressReporter {
     await this.#drainAll();
   }
 
+  async fail(reference: string): Promise<void> {
+    this.#accepting = false;
+    this.#clearTimer();
+    this.#queuedUpdate = { state: "failed", finalText: reference };
+    await this.#drainAll();
+  }
+
   async close(): Promise<void> {
     this.#accepting = false;
     this.#discardPending = true;
@@ -85,7 +95,7 @@ export class SlackProgressReporter {
     if (this.#timer || !this.#queuedUpdate || !this.#accepting) return;
     const delay = Math.max(
       0,
-      SLACK_PROGRESS_INTERVAL_MS - (Date.now() - this.#lastUpdateAt),
+      this.#intervalMs - (Date.now() - this.#lastUpdateAt),
     );
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
@@ -106,7 +116,7 @@ export class SlackProgressReporter {
     void drain.finally(() => {
       if (this.#drainPromise === drain) this.#drainPromise = undefined;
       if (this.#discardPending || !this.#queuedUpdate) return;
-      if (this.#queuedUpdate.state === "completed") {
+      if (this.#queuedUpdate.state !== "working") {
         void this.#startDrain();
       } else {
         this.#schedule();
@@ -123,7 +133,7 @@ export class SlackProgressReporter {
       await this.#attemptUpdate(update.state, update.finalText);
       // record() or complete() may replace the queue while the request awaits.
       const nextUpdate = this.#queuedUpdate as QueuedProgressUpdate | undefined;
-      if (nextUpdate?.state === "completed") continue;
+      if (nextUpdate && nextUpdate.state !== "working") continue;
       if (nextUpdate) this.#schedule();
       return;
     }
@@ -137,6 +147,7 @@ export class SlackProgressReporter {
   }
 
   async #updateWithTimeout(text: string): Promise<void> {
+    if (text === this.#lastRenderedText) return;
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
@@ -150,6 +161,7 @@ export class SlackProgressReporter {
     });
     try {
       await Promise.race([Promise.resolve().then(() => this.#update(text)), timeout]);
+      this.#lastRenderedText = text;
     } finally {
       if (timer) clearTimeout(timer);
     }

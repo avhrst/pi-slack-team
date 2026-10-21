@@ -56,7 +56,7 @@ export const agentConfigSchema = z
         teamId: slackId("T"),
         appId: slackId("A"),
         allowedUserIds: z.array(slackId("[UW]")).min(1),
-        progressMode: z.enum(["summary", "raw"]).default("summary"),
+        progressMode: z.enum(["summary", "balanced", "raw"]).default("summary"),
         fileUploads: z.boolean().default(false),
         maxFileBytes: z
           .number()
@@ -73,6 +73,9 @@ export const agentConfigSchema = z
         tmuxCommand: absolutePath.default("/usr/local/bin/tmux"),
         turnTimeoutMs: z.number().int().min(10_000).max(86_400_000).default(3_600_000),
         command: absolutePath.default("/usr/bin/pi"),
+        provider: z.string().min(1).optional(),
+        model: z.string().min(1).optional(),
+        thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
         cwd: absolutePath,
         agentDir: absolutePath,
         sessionDir: absolutePath,

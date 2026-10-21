@@ -1,4 +1,5 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
+import { ActivityProgress, compactProgressText } from "../pi/activity-progress.js";
 
 // Slack recommends keeping top-level message text below 4,000 characters.
 // Final answers are chunked separately; progress updates favor reliability.
@@ -7,8 +8,8 @@ const MAX_TOOL_SECTION_CHARS = 1_200;
 const MAX_ENTRIES = 100;
 const DEPLOY_STORE_RE = /^[A-Z0-9_]{1,32}$/u;
 
-export type ProgressMode = "summary" | "raw";
-export type ProgressState = "working" | "completed";
+export type ProgressMode = "summary" | "balanced" | "raw";
+export type ProgressState = "working" | "completed" | "failed";
 
 type ProgressEntry =
   | { kind: "text"; value: string }
@@ -199,6 +200,7 @@ export function toSlackMrkdwn(text: string): string {
 export class PiProgressTranscript {
   readonly #mode: ProgressMode;
   readonly #entries: ProgressEntry[] = [];
+  readonly #activity = new ActivityProgress();
   readonly #tools = new Map<string, ToolStats>();
   readonly #toolCalls = new Map<string, string>();
   readonly #rawTools = new Map<string, RawToolEntry>();
@@ -211,6 +213,20 @@ export class PiProgressTranscript {
   }
 
   record(event: RpcRecord): boolean {
+    if (this.#mode === "balanced") {
+      const changed = this.#activity.record(event);
+      const status = event.type === "tool_execution_update" ? deploymentProgress(event.partialResult)
+        : event.type === "tool_execution_end" ? deploymentProgress(event.result) : undefined;
+      if (status && status !== this.#deploymentStatus) {
+        this.#deploymentStatus = status;
+        return true;
+      }
+      return changed;
+    }
+    if (event.type === "agent_progress" && typeof event.text === "string") {
+      this.#appendStatus(toSlackMrkdwn(compactProgressText(event.text)));
+      return true;
+    }
     if (event.type === "message_update") {
       const update = asRecord(event.assistantMessageEvent);
       if (update?.type !== "text_delta" || typeof update.delta !== "string") {
@@ -290,9 +306,11 @@ export class PiProgressTranscript {
   }
 
   render(state: ProgressState, finalText?: string): string {
+    if (this.#mode === "balanced") return this.#renderBalanced(state, finalText);
     const heading =
       state === "completed"
         ? ":white_check_mark: *Pi completed*"
+        : state === "failed" ? ":warning: *Pi could not complete this request*"
         : ":hourglass_flowing_sand: *Pi is working…*";
     const entries = [...this.#entries];
     if (state === "completed" && finalText?.trim()) {
@@ -320,6 +338,22 @@ export class PiProgressTranscript {
         ? body
         : `…\n${body.slice(-(available - 2))}`;
     return `${heading}\n\n${bounded}`;
+  }
+
+  #renderBalanced(state: ProgressState, reference?: string): string {
+    const activity = this.#activity.snapshot();
+    const plain = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    const sections = [state === "completed" ? ":white_check_mark: *Роботу над запитом завершено*"
+      : state === "failed" ? ":warning: *Не вдалося завершити запит*"
+      : ":hourglass_flowing_sand: *Працюю над запитом*"];
+    if (activity.notes.length) sections.push(`*Хід роботи*\n${activity.notes.map((note) => `• ${plain(note)}`).join("\n")}`);
+    if (state === "working") sections.push(`*Зараз:* ${plain(activity.current)}`);
+    if (activity.workers.length) sections.push(`*Агенти*\n${activity.workers.map((worker) => `• *${worker.id}:* ${plain(compactProgressText(worker.text, 260))}`).join("\n")}`);
+    if (this.#deploymentStatus) sections.push(this.#deploymentStatus);
+    if (activity.failures) sections.push(`:warning: Невдалих робочих кроків: ${activity.failures}. Це не обов’язково означає невдачу всього завдання; подробиці — у підсумку.`);
+    if (state === "failed" && reference && /^[a-zA-Z0-9-]{1,100}$/u.test(reference)) sections.push(`Код звернення: ${reference}`);
+    const text = sections.join("\n\n");
+    return text.length <= MAX_TRANSCRIPT_CHARS ? text : `${text.slice(0, MAX_TRANSCRIPT_CHARS - 1)}…`;
   }
 
   #renderEntry(entry: ProgressEntry): string {

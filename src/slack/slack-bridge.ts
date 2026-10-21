@@ -359,7 +359,8 @@ export class SlackBridge {
         });
       }
     } catch (error) {
-      await progress.close();
+      const balancedFailure = Boolean(workingTs && this.#config.slack.progressMode === "balanced");
+      if (!balancedFailure) await progress.close();
       const correlationId = crypto.randomUUID();
       this.#logger.error("slack_message_failed", {
         agentId: this.#config.agentId,
@@ -367,7 +368,9 @@ export class SlackBridge {
         correlationId,
         error,
       });
-      if (workingTs) {
+      if (balancedFailure) {
+        await progress.fail(correlationId);
+      } else if (workingTs) {
         await client.chat
           .update({
             channel: message.channelId,

@@ -37,7 +37,7 @@ describe("Slack app manifest", () => {
         "assistant:write",
         "channels:history",
         "chat:write",
-        ...(file === "deploy-agent.yaml" ? ["files:read"] : []),
+        "files:read",
         "groups:history",
         "im:history",
       ]);
@@ -144,6 +144,7 @@ describe("Slack app manifest", () => {
       "assistant:write",
       "channels:history",
       "chat:write",
+      "files:read",
       "groups:history",
       "im:history",
     ]);

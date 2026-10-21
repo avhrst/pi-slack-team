@@ -30,6 +30,37 @@ function rawToolEvents(reporter: SlackProgressReporter): void {
 }
 
 describe("SlackProgressReporter", () => {
+  it("throttles balanced updates and suppresses unchanged rendered activity", async () => {
+    vi.useFakeTimers();
+    try {
+      const update = vi.fn(async () => undefined);
+      const reporter = new SlackProgressReporter("balanced", update, () => undefined);
+      reporter.record(event("tool_execution_start", { toolName: "read", toolCallId: "one" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+      reporter.record(event("tool_execution_end", { toolName: "read", toolCallId: "one" }));
+      reporter.record(event("tool_execution_start", { toolName: "read", toolCallId: "two" }));
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(update).toHaveBeenCalledTimes(1);
+      reporter.record(event("agent_progress", { text: "Знайшов причину, перевіряю виправлення." }));
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(update).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(update).toHaveBeenCalledTimes(2);
+      await reporter.close();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("retains balanced milestones on failure without publishing exception traces", async () => {
+    const updates: string[] = [];
+    const reporter = new SlackProgressReporter("balanced", async (text) => { updates.push(text); }, () => undefined);
+    reporter.record(event("agent_progress", { text: "Потрібне уточнення цільового середовища." }));
+    await reporter.fail("request-123");
+    expect(updates.at(-1)).toContain("Не вдалося завершити запит");
+    expect(updates.at(-1)).toContain("Потрібне уточнення");
+    expect(updates.at(-1)).toContain("request-123");
+  });
+
   it("retries a rejected raw update with a compact summary", async () => {
     const updates: string[] = [];
     const errors: ProgressUpdateAttempt[] = [];

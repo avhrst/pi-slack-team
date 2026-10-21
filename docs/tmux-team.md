@@ -26,7 +26,7 @@ Slack humans → existing allowlist + dedup + Slack bridge
                        result buffer → manager tool → Slack human
 ```
 
-The relay **does not** grant shared tmux-server access, run arbitrary commands, type into terminals, or parse terminal output. It copies bounded JSON buffers using `load-buffer` and `save-buffer`; `wait-for -S` wakes consumers. Consumers recheck buffers after a bounded wait because wakeups can coalesce. Each agent's existing Unix account owns its server/socket/process. Root can observe all of them without giving one agent control of another account.
+The relay **does not** grant shared tmux-server access, run arbitrary commands, type into terminals, or parse terminal output. It copies bounded JSON buffers using `load-buffer` and `save-buffer`; `wait-for -S` wakes consumers. Consumers recheck buffers after a bounded wait because wakeups can coalesce. Idle/aborted waits are ended by signalling `wait-for -S`, not routinely killing waiting clients: tmux retains killed clients' wait items until a signal, which otherwise causes memory growth during long idle periods. Each agent's existing Unix account owns its server/socket/process. Root can observe all of them without giving one agent control of another account.
 
 No per-Slack-user, per-thread, per-task or observer tmux sessions are created. The session is named after `expectedUnixUser`; its one window is `pi`. Slack routing records remain per conversation **only to route responses and confirmations**, not to allocate Pi processes. All conversations bind to `agent:<team>:<app>` when used. The fixed Pi history is `<pi.sessionDir>/tmux-agent.jsonl`.
 
@@ -78,7 +78,26 @@ Equivalent raw tmux command:
 tmux -S /home/dev-agent/.local/state/pi-slack-team/tmux.sock attach-session -r -t dev-agent
 ```
 
-Terminal output, tool arguments and thinking are visible to authorized terminal observers. Treat terminal captures as sensitive. Thinking is not transported to Slack. Slack progress retains the existing summary/raw policy.
+Terminal output, tool arguments and thinking are visible to authorized terminal observers. Treat terminal captures as sensitive. Thinking is not transported to Slack. Set `slack.progressMode: balanced` for a middle level between `summary` (tool counts) and `raw` (technical output).
+
+Balanced progress shows the last three public milestones, current activity, and individual worker updates. For example (illustrative, not a real task):
+
+```text
+Працюю над запитом
+
+Хід роботи
+• Перевірю, які налаштування впливають на збій.
+• Знайшов розбіжність; перевіряю, чи достатньо локального виправлення.
+
+Зараз: Оцінюю результати виконаних кроків
+
+Агенти
+• support: Перевіряю потрібні матеріали; змін поки не вносив.
+```
+
+These are public, outcome-oriented explanations, not private reasoning or generated summaries of tool traces. Raw arguments/results are never used to compose narrative updates. A tool-name-only fallback reports activity when no public note is available, without inventing findings or success. Final answers are sent separately. Balanced updates are coalesced every three seconds and duplicate views suppressed. Pending Slack confirmations and failed steps are visible without exposing error stacks.
+
+Worker public notes survive tool-output bursts in a separate bounded part of the tmux snapshot. The final snapshot is flushed before the result, so short turns do not lose their progress.
 
 Managers get `team_status` (live, bounded relay heartbeat) and `delegate_to_worker` (correlated request/result/progress). The old `subagent` spawning tool is excluded/blocked in managed panes; standalone personal Pi configuration is not uninstalled or rewritten. Do not use old subagent slash workflows, hidden Pi subprocesses or manual shell spawning as an alternate team transport.
 

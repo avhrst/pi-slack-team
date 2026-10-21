@@ -150,6 +150,7 @@ describe("RpcClient", () => {
         sessionDir: "/tmp/fake-sessions",
         sessionName: "test",
         requestTimeoutMs: 2_000,
+        appendSystemPrompt: "Give concise public progress notes, not traces.",
         extensionPaths: ["/opt/pi-slack-team/delegate-extension.js"],
         environment: { PI_SLACK_TEAM_TEST_CONTEXT: "context-1" },
       },
@@ -161,9 +162,11 @@ describe("RpcClient", () => {
 
     await rpc.start();
     expect(invocation?.command).toBe("/usr/bin/pi");
-    expect(invocation?.args.slice(0, 4)).toEqual([
+    expect(invocation?.args.slice(0, 6)).toEqual([
       "--mode",
       "rpc",
+      "--append-system-prompt",
+      "Give concise public progress notes, not traces.",
       "--extension",
       "/opt/pi-slack-team/delegate-extension.js",
     ]);

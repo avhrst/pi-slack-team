@@ -48,6 +48,7 @@ export const readySchema = z.object({
   agentId: agentIdSchema, instanceId: idSchema,
   sessionFile: z.string().startsWith("/"), sessionId: z.string().min(1),
   updatedAt: z.number(), busy: z.boolean(),
+  provider: z.string().optional(), model: z.string().optional(), thinkingLevel: z.string().optional(),
 });
 export type Ready = z.infer<typeof readySchema>;
 export const runResultSchema = z.object({

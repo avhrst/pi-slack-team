@@ -20,6 +20,7 @@ import {
 } from "../routing/session-key.js";
 import { RpcClient, type RpcRecord } from "./rpc-client.js";
 import type { RpcClientOptions } from "./rpc-client.js";
+import { PUBLIC_PROGRESS_GUIDANCE } from "./activity-progress.js";
 
 export interface PiTurnResult {
   text: string;
@@ -238,6 +239,7 @@ export class PiSessionPool {
       agentDir: this.#config.pi.agentDir,
       sessionDir: this.#config.pi.sessionDir,
       requestTimeoutMs: this.#config.pi.requestTimeoutMs,
+      ...(this.#config.slack.progressMode === "balanced" ? { appendSystemPrompt: PUBLIC_PROGRESS_GUIDANCE } : {}),
       ...(interAgentEnvironment
         ? {
             extensionPaths: [INTER_AGENT_EXTENSION_PATH],

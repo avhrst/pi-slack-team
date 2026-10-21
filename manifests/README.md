@@ -38,7 +38,7 @@ The generic manifests use the same minimal base scopes because both roles may bo
 - `groups:history`
 - `im:history`
 
-Add `files:read` only when the corresponding runtime explicitly sets `slack.fileUploads: true`.
+Add `files:read` only when the corresponding runtime explicitly sets `slack.fileUploads: true`. The four environment-specific Pinet manifests enable this bounded attachment support; the generic examples keep it opt-in.
 
 ## Environment-specific examples
 

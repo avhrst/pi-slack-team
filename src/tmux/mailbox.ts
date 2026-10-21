@@ -94,8 +94,20 @@ export class TmuxMailbox {
   }
 
   async wait(signal: AbortSignal, timeoutMs = 1_000): Promise<void> {
-    // Buffers are the source of truth. A bounded wait also covers lost/coalesced signals.
-    await this.exec(["wait-for", WAKE_CHANNEL], undefined, timeoutMs, signal).catch(() => undefined);
+    if (signal.aborted) return;
+    // Killing a waiting tmux client leaves its server-side wait item queued until
+    // signalled. Repeating that on an idle agent leaks memory. Wake the channel
+    // normally on timeout/abort instead; a hard timeout is only a failure guard.
+    const wake = () => { void this.exec(["wait-for", "-S", WAKE_CHANNEL]).catch(() => undefined); };
+    const timer = setTimeout(wake, timeoutMs);
+    signal.addEventListener("abort", wake, { once: true });
+    if (signal.aborted) wake();
+    try {
+      await this.exec(["wait-for", WAKE_CHANNEL], undefined, timeoutMs + 5_000).catch(() => undefined);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", wake);
+    }
   }
 
   #validateName(name: string): void {

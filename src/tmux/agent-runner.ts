@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentConfig } from "../config/schema.js";
 import type { Logger } from "../observability/logger.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
+import { ActivityProgress } from "../pi/activity-progress.js";
 import type { PiTurnResult, PiUiHandler } from "../pi/session-pool.js";
 import type { ConversationKey, ConversationRecord, Registry } from "../storage/registry.js";
 import { bufferName, TmuxMailbox, tmuxSocketPath } from "./mailbox.js";
@@ -48,6 +49,9 @@ export class TmuxAgentRunner {
         "/usr/bin/env", `PI_CODING_AGENT_DIR=${this.config.pi.agentDir}`,
         `PI_CODING_AGENT_SESSION_DIR=${this.config.pi.sessionDir}`, `PI_TMUX_CONFIG=${this.configPath}`,
         this.config.pi.command, "--session", sessionFile,
+        ...(this.config.pi.provider ? ["--provider", this.config.pi.provider] : []),
+        ...(this.config.pi.model ? ["--model", this.config.pi.model] : []),
+        ...(this.config.pi.thinkingLevel ? ["--thinking", this.config.pi.thinkingLevel] : []),
         "--exclude-tools", "subagent",
         "--extension", fileURLToPath(new URL("./agent-extension.js", import.meta.url)),
       ], undefined, 10_000);
@@ -193,7 +197,7 @@ export class TmuxAgentRunner {
         }).finally(() => { this.#peers.delete(name); });
         this.#peers.set(name, task);
       }
-      await this.mailbox.wait(this.#stop.signal, 500);
+      await this.mailbox.wait(this.#stop.signal, 2_000);
     }
   }
 
@@ -211,7 +215,8 @@ export class TmuxAgentRunner {
       if (!claimed) text = "Previous worker delivery was interrupted or already accepted; not replaying tools.";
       else {
         const id = workerRunId(request.from, request.id);
-        let status = "queued";
+        const activity = new ActivityProgress();
+        let status = "";
         let statusWrite = Promise.resolve();
         const progress = (next: string) => {
           if (next === status) return;
@@ -220,16 +225,14 @@ export class TmuxAgentRunner {
             id: request.id, to: request.from, text: next,
           }, false)).catch(() => undefined);
         };
-        progress("accepted; waiting for agent queue");
+        progress(activity.describe());
         try {
           const result = await this.#run({
             id, text: request.task, origin: request.origin, fromAgent: request.from,
             createdAt: request.createdAt,
             expiresAt: Math.min(request.expiresAt, Date.now() + this.config.pi.turnTimeoutMs),
           }, (event) => {
-            if (event.type === "agent_start") progress("running");
-            if (event.type === "tool_execution_start") progress(`running tool ${String(event.toolName).slice(0, 120)}`);
-            if (event.type === "tool_execution_end") progress(`tool ${String(event.toolName).slice(0, 120)} ${event.isError ? "failed" : "completed"}`);
+            if (activity.record(event)) progress(activity.describe());
           });
           text = result.text;
           ok = true;

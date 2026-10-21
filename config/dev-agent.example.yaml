@@ -12,6 +12,10 @@ slack:
   allowedUserIds:
     - U0000000000
   progressMode: summary
+  # Requires the files:read scope included in manifests/dev-agent.yaml.
+  fileUploads: true
+  maxFileBytes: 20971520
+  maxFilesPerMessage: 5
 
 # Replace each synthetic peer identity and configure the reciprocal dev peer on
 # that worker before enabling delegation.

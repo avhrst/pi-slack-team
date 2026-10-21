@@ -10,8 +10,9 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: raw
-  fileUploads: false
+  progressMode: summary
+  # Requires the files:read scope included in manifests/msboard-agent.yaml.
+  fileUploads: true
   maxFileBytes: 20971520
   maxFilesPerMessage: 5
 
