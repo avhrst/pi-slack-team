@@ -1,6 +1,7 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
 import {
   PiProgressTranscript,
+  type DeliveryFailure,
   type ProgressMode,
   type ProgressState,
 } from "./pi-progress.js";
@@ -50,7 +51,7 @@ export type ProgressUpdateAttempt = "configured" | "summary-fallback";
 
 interface QueuedProgressUpdate {
   state: ProgressState;
-  finalText?: string;
+  failure?: DeliveryFailure;
 }
 
 /**
@@ -108,10 +109,13 @@ export class SlackProgressReporter {
     this.#schedule();
   }
 
-  async complete(finalText: string): Promise<void> {
+  /** Settles the placeholder as a receipt, noting a failed answer delivery. */
+  async complete(failure?: DeliveryFailure): Promise<void> {
     this.#accepting = false;
     this.#clearTimer();
-    this.#queuedUpdate = { state: "completed", finalText };
+    this.#queuedUpdate = failure
+      ? { state: "delivery-failed", failure }
+      : { state: "completed" };
     await this.#drainAll();
   }
 
@@ -150,7 +154,7 @@ export class SlackProgressReporter {
     void drain.finally(() => {
       if (this.#drainPromise === drain) this.#drainPromise = undefined;
       if (this.#discardPending || !this.#queuedUpdate) return;
-      if (this.#queuedUpdate.state === "completed") {
+      if (this.#queuedUpdate.state !== "working") {
         void this.#startDrain();
       } else {
         this.#schedule();
@@ -164,10 +168,10 @@ export class SlackProgressReporter {
       const update = this.#queuedUpdate;
       this.#queuedUpdate = undefined;
       this.#lastUpdateAt = Date.now();
-      await this.#attemptUpdate(update.state, update.finalText);
+      await this.#attemptUpdate(update.state, update.failure);
       // record() or complete() may replace the queue while the request awaits.
       const nextUpdate = this.#queuedUpdate as QueuedProgressUpdate | undefined;
-      if (nextUpdate?.state === "completed") continue;
+      if (nextUpdate && nextUpdate.state !== "working") continue;
       if (nextUpdate) this.#schedule();
       return;
     }
@@ -201,17 +205,17 @@ export class SlackProgressReporter {
 
   async #attemptUpdate(
     state: ProgressState,
-    finalText?: string,
+    failure?: DeliveryFailure,
   ): Promise<void> {
     // Working updates are superseded within a second; only the final state is
     // worth waiting for, or the message stays "working" forever.
-    const maxAttempts = state === "completed" ? FINAL_UPDATE_ATTEMPTS : 1;
+    const maxAttempts = state === "working" ? 1 : FINAL_UPDATE_ATTEMPTS;
     for (let attempt = 1; ; attempt += 1) {
       const transcript = this.#usingSummaryFallback
         ? this.#summaryTranscript ?? this.#configuredTranscript
         : this.#configuredTranscript;
       try {
-        await this.#updateWithTimeout(transcript.render(state, finalText));
+        await this.#updateWithTimeout(transcript.render(state, failure));
         return;
       } catch (error) {
         this.#reportError(

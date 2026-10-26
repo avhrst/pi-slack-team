@@ -46,12 +46,12 @@ describe("SlackProgressReporter", () => {
     );
 
     rawToolEvents(reporter);
-    await reporter.complete("Completed result");
+    await reporter.complete();
 
     expect(update).toHaveBeenCalledTimes(2);
     expect(updates[0]).toContain("detailed tool output");
     expect(updates[1]).toContain(":white_check_mark: *Pi completed*");
-    expect(updates[1]).toContain("*Tools:* `read` × 1");
+    expect(updates[1]).toContain(" · `read` × 1");
     expect(updates[1]).not.toContain("detailed tool output");
     expect(errors).toEqual(["configured"]);
   });
@@ -106,7 +106,7 @@ describe("SlackProgressReporter", () => {
         assistantMessageEvent: { type: "text_delta", delta: "Checking." },
       }),
     );
-    await expect(reporter.complete("Done")).resolves.toBeUndefined();
+    await expect(reporter.complete()).resolves.toBeUndefined();
 
     expect(update).toHaveBeenCalledTimes(1);
     expect(attempts).toEqual(["configured"]);
@@ -124,7 +124,7 @@ describe("SlackProgressReporter", () => {
     );
 
     rawToolEvents(reporter);
-    await expect(reporter.complete("Done")).resolves.toBeUndefined();
+    await expect(reporter.complete()).resolves.toBeUndefined();
 
     expect(update).toHaveBeenCalledTimes(2);
     expect(attempts).toEqual(["configured", "summary-fallback"]);
@@ -213,7 +213,7 @@ describe("SlackProgressReporter", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(update).toHaveBeenCalledTimes(1);
 
-      const completing = reporter.complete("Done");
+      const completing = reporter.complete();
       await vi.advanceTimersByTimeAsync(100);
       await completing;
 
@@ -236,7 +236,7 @@ describe("SlackProgressReporter", () => {
     const reporter = new SlackProgressReporter("raw", update, () => undefined);
 
     rawToolEvents(reporter);
-    await reporter.complete("Completed result");
+    await reporter.complete();
 
     expect(update).toHaveBeenCalledTimes(2);
     expect(updates[1]).toContain(":white_check_mark: *Pi completed*");
@@ -256,7 +256,7 @@ describe("SlackProgressReporter", () => {
       (_error, attempt) => errors.push(attempt),
     );
 
-    await reporter.complete("Completed result");
+    await reporter.complete();
 
     expect(update).toHaveBeenCalledTimes(3);
     expect(update).toHaveBeenLastCalledWith(
@@ -265,13 +265,31 @@ describe("SlackProgressReporter", () => {
     expect(errors).toEqual(["configured", "configured"]);
   });
 
+  it("retries a delivery-failed receipt like any final state", async () => {
+    let calls = 0;
+    const update = vi.fn<(text: string) => Promise<void>>(async () => {
+      calls += 1;
+      if (calls === 1) throw rateLimited();
+    });
+    const reporter = new SlackProgressReporter("summary", update, () => undefined);
+    reporter.record(event("tool_execution_start", { toolCallId: "c", toolName: "bash" }));
+    reporter.record(event("tool_execution_end", { toolCallId: "c", toolName: "bash" }));
+
+    await reporter.complete({ posted: 1, total: 3, correlationId: "ref-1" });
+
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update).toHaveBeenLastCalledWith(
+      ":warning: Pi completed, but Slack rejected part 2 of 3 · `bash` × 1\n\n_Reference: ref-1_",
+    );
+  });
+
   it("gives up on the final update after bounded transient retries", async () => {
     const update = vi.fn(async () => {
       throw rateLimited();
     });
     const reporter = new SlackProgressReporter("summary", update, () => undefined);
 
-    await reporter.complete("Completed result");
+    await reporter.complete();
 
     expect(update).toHaveBeenCalledTimes(3);
   });

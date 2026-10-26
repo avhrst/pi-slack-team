@@ -9,7 +9,14 @@ const MAX_ENTRIES = 100;
 const DEPLOY_STORE_RE = /^[A-Z0-9_]{1,32}$/u;
 
 export type ProgressMode = "summary" | "raw";
-export type ProgressState = "working" | "completed";
+export type ProgressState = "working" | "completed" | "delivery-failed";
+
+/** Pi completed, but Slack rejected `posted + 1` of `total` response parts. */
+export interface DeliveryFailure {
+  posted: number;
+  total: number;
+  correlationId: string;
+}
 
 type ProgressEntry =
   | { kind: "text"; value: string }
@@ -327,29 +334,37 @@ export class PiProgressTranscript {
     return false;
   }
 
-  render(state: ProgressState, finalText?: string): string {
-    const heading =
-      state === "completed"
-        ? ":white_check_mark: *Pi completed*"
-        : ":hourglass_flowing_sand: *Pi is working…*";
-    const entries = [...this.#entries];
-    if (state === "completed" && finalText?.trim()) {
-      const lastTextIndex = entries.findLastIndex(
-        (entry) => entry.kind === "text",
-      );
-      const last = entries[lastTextIndex];
-      if (last?.kind === "text" && last.value.trim() === finalText.trim()) {
-        entries.splice(lastTextIndex, 1);
-      }
-    }
+  /**
+   * Final states are a receipt: the answer is posted separately, so streamed
+   * text is dropped and only status, deployment and tool lines remain.
+   */
+  render(state: ProgressState, failure?: DeliveryFailure): string {
+    const final = state !== "working";
+    const toolCalls = this.#mode === "summary" ? this.#toolSummary(state) : "";
+    const title =
+      state === "working"
+        ? ":hourglass_flowing_sand: *Pi is working…*"
+        : state === "delivery-failed" && failure
+          ? `:warning: Pi completed, but Slack rejected part ${failure.posted + 1} of ${failure.total}`
+          : ":white_check_mark: *Pi completed*";
+    const heading = final && toolCalls ? `${title} · ${toolCalls}` : title;
 
-    const transcript = entries
+    const transcript = this.#entries
+      .filter((entry) => !final || entry.kind !== "text")
       .map((entry) => this.#renderEntry(entry))
       .filter(Boolean)
       .join("\n\n")
       .trim();
-    const tools = this.#mode === "summary" ? this.#renderToolSummary(state) : "";
-    const body = [transcript, this.#deploymentStatus, tools].filter(Boolean).join("\n\n");
+    const tools = !final && toolCalls
+      ? `:hammer_and_wrench: *Tools:* ${toolCalls}`
+      : "";
+    const reference =
+      state === "delivery-failed" && failure
+        ? `_Reference: ${failure.correlationId}_`
+        : "";
+    const body = [transcript, this.#deploymentStatus, tools, reference]
+      .filter(Boolean)
+      .join("\n\n");
     if (!body) return heading;
 
     const available = MAX_TRANSCRIPT_CHARS - heading.length - 2;
@@ -412,7 +427,7 @@ export class PiProgressTranscript {
     return created;
   }
 
-  #renderToolSummary(state: ProgressState): string {
+  #toolSummary(state: ProgressState): string {
     if (this.#tools.size === 0) return "";
     const calls = [...this.#tools.entries()]
       .map(([name, stats]) => `\`${name}\` × ${stats.total}`)
@@ -429,9 +444,10 @@ export class PiProgressTranscript {
       ...(state === "working" && running > 0 ? [`${running} running`] : []),
       ...(failed > 0 ? [`:warning: ${failed} failed`] : []),
     ];
-    return `:hammer_and_wrench: *Tools:* ${calls}${
-      suffix.length > 0 ? ` · ${suffix.join(" · ")}` : ""
-    }`;
+    const summary = `${calls}${suffix.length > 0 ? ` · ${suffix.join(" · ")}` : ""}`;
+    return summary.length <= MAX_TOOL_SECTION_CHARS
+      ? summary
+      : `${summary.slice(0, MAX_TOOL_SECTION_CHARS)}…`;
   }
 
   #appendText(delta: string): boolean {

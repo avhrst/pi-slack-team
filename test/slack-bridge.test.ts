@@ -95,20 +95,25 @@ afterEach(() => {
 });
 
 describe("SlackBridge response delivery", () => {
-  it("reports a delivery failure without claiming that Pi failed", async () => {
+  it("reports a delivery failure in the receipt without claiming that Pi failed", async () => {
     slack.postMessage
       .mockResolvedValueOnce({ ts: "working-ts" })
       .mockRejectedValueOnce(new Error("msg_too_long"))
       .mockResolvedValue({ ts: "notice-ts" });
-    bridge(async () => "Deployment finished.");
+    bridge(async (hooks) => {
+      hooks.onPiEvent?.({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash" });
+      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "c1", toolName: "bash" });
+      return "Deployment finished.";
+    });
 
     await directMessage();
 
-    const updates = slack.update.mock.calls.map(([call]) => (call as { text: string }).text);
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).toContain("Pi completed this request");
-    expect(updates[0]).toContain("part 1 of 1");
-    expect(updates[0]).not.toContain("could not complete");
+    expect(slack.update).not.toHaveBeenCalled();
+    const receipt = (slack.progressUpdate.mock.lastCall?.[0] as { text: string }).text;
+    expect(receipt).toMatch(
+      /^:warning: Pi completed, but Slack rejected part 1 of 1 · `bash` × 1\n\n_Reference: [0-9a-f-]{36}_$/u,
+    );
+    expect(receipt).not.toContain("could not complete");
     expect(logger.error).toHaveBeenCalledWith(
       "slack_response_delivery_failed",
       expect.objectContaining({ postedParts: 0, totalParts: 1 }),
@@ -129,18 +134,63 @@ describe("SlackBridge response delivery", () => {
     ]);
   });
 
-  it("posts the final answer after marking progress completed", async () => {
+  it("posts the final answer before settling the placeholder", async () => {
     slack.postMessage.mockResolvedValue({ ts: "working-ts" });
     bridge(async () => "All green.");
 
     await directMessage();
 
     expect(slack.progressUpdate).toHaveBeenLastCalledWith(
-      expect.objectContaining({ ts: "working-ts", text: expect.stringContaining("Pi completed") }),
+      expect.objectContaining({ ts: "working-ts", text: ":white_check_mark: *Pi completed*" }),
+    );
+    expect(slack.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        text: "All green.",
+        thread_ts: "1.1",
+        unfurl_links: false,
+        unfurl_media: false,
+      }),
+    );
+    const answerOrder = slack.postMessage.mock.invocationCallOrder.at(-1)!;
+    const receiptOrder = slack.progressUpdate.mock.invocationCallOrder.at(-1)!;
+    expect(answerOrder).toBeLessThan(receiptOrder);
+    expect(slack.update).not.toHaveBeenCalled();
+  });
+
+  it("still delivers the answer when the placeholder post fails", async () => {
+    slack.postMessage
+      .mockRejectedValueOnce(new Error("ratelimited"))
+      .mockResolvedValue({ ts: "answer-ts" });
+    bridge(async () => "All green.");
+
+    await directMessage();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "slack_placeholder_failed",
+      expect.objectContaining({ agentId: "deploy", eventId: "Ev01" }),
     );
     expect(slack.postMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ text: "All green.", thread_ts: "1.1" }),
     );
+    expect(slack.progressUpdate).not.toHaveBeenCalled();
+  });
+
+  it("posts a thread line for a Pi failure without a placeholder", async () => {
+    slack.postMessage
+      .mockRejectedValueOnce(new Error("ratelimited"))
+      .mockResolvedValue({ ts: "failure-ts" });
+    bridge(async () => {
+      throw new Error("model unavailable");
+    });
+
+    await directMessage();
+
     expect(slack.update).not.toHaveBeenCalled();
+    expect(slack.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        thread_ts: "1.1",
+        text: expect.stringMatching(/^:x: Pi could not complete this request\. Reference: /u),
+      }),
+    );
   });
 });

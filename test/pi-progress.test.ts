@@ -66,7 +66,7 @@ describe("PiProgressTranscript", () => {
     );
   });
 
-  it("removes the duplicated final answer from completed progress", () => {
+  it("renders final states as a compact receipt without streamed text", () => {
     const transcript = new PiProgressTranscript();
     transcript.record(
       event("message_update", {
@@ -97,14 +97,45 @@ describe("PiProgressTranscript", () => {
         },
       }),
     );
+    transcript.record(event("compaction_start"));
 
-    const rendered = transcript.render(
-      "completed",
-      "**Database is operational.**",
+    expect(transcript.render("working")).toContain("I’ll inspect the database.");
+    expect(transcript.render("completed")).toBe(
+      ":white_check_mark: *Pi completed* · `bash` × 1\n\n" +
+        ":arrows_counterclockwise: Compacting session context…",
     );
-    expect(rendered).toContain("I’ll inspect the database.");
-    expect(rendered).toContain("*Tools:* `bash` × 1");
-    expect(rendered).not.toContain("Database is operational");
+    expect(
+      transcript.render("delivery-failed", {
+        posted: 0,
+        total: 2,
+        correlationId: "ref-1",
+      }),
+    ).toBe(
+      ":warning: Pi completed, but Slack rejected part 1 of 2 · `bash` × 1\n\n" +
+        ":arrows_counterclockwise: Compacting session context…\n\n" +
+        "_Reference: ref-1_",
+    );
+  });
+
+  it("keeps bounded raw tool entries but no text in the final receipt", () => {
+    const transcript = new PiProgressTranscript("raw");
+    transcript.record(
+      event("message_update", {
+        assistantMessageEvent: { type: "text_delta", delta: "Checking." },
+      }),
+    );
+    transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-1",
+        toolName: "bash",
+        args: { command: "uptime" },
+      }),
+    );
+
+    const completed = transcript.render("completed");
+    expect(completed).toContain("*Tool `bash`*");
+    expect(completed).toContain("$ uptime");
+    expect(completed).not.toContain("Checking.");
   });
 
   it("renders raw tool arguments and live results only in raw mode", () => {
