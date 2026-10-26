@@ -8,6 +8,9 @@ import {
   incomingDelegationResponse,
 } from "../src/inter-agent/protocol.js";
 import type { IncomingSlackMessage } from "../src/routing/chat-key.js";
+import { escapeSlackText } from "../src/slack/mrkdwn.js";
+import { parseAppMentionEvent } from "../src/slack/parse-event.js";
+import { toSlackMrkdwn } from "../src/slack/pi-progress.js";
 
 const delegationId = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -177,4 +180,44 @@ describe("inter-agent Slack protocol", () => {
     );
     expect(response).toMatchObject({ status: "error", text: "failed safely" });
   });
+
+  it("round-trips request and response envelopes through Slack escaping", () => {
+    const body = { event_id: "Ev01", team_id: "T01", api_app_id: "A01" };
+    const task = "Run `a && b` for Promise<string> & <!channel>";
+    const requestEvent = parseAppMentionEvent(
+      body,
+      {
+        channel: "C01",
+        user: "UMANAGER",
+        ts: "1.0",
+        text: delegationRequestText("UWORKER", delegationId, escapeSlackText(task)),
+        bot_id: "BMANAGER",
+        app_id: "A01",
+      },
+      "UWORKER",
+    );
+    const request = incomingDelegationRequest(config("worker"), requestEvent!);
+    expect(request?.task).toBe(task);
+
+    const [responseText] = delegationResponseMessages(
+      request!,
+      toSlackMrkdwn("Done: a && b <!here>"),
+    );
+    const responseEvent = parseAppMentionEvent(
+      { ...body, api_app_id: "A02" },
+      {
+        channel: "C01",
+        user: "UWORKER",
+        ts: "2.0",
+        text: responseText,
+        bot_id: "BWORKER",
+        app_id: "A02",
+      },
+      "UMANAGER",
+    );
+    expect(
+      incomingDelegationResponse(config("manager"), responseEvent!)?.text,
+    ).toBe("Done: a && b <!here>");
+  });
 });
+

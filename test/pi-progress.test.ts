@@ -304,4 +304,87 @@ describe("toSlackMrkdwn", () => {
       "*Status*\n*Healthy* — <https://example.com|details>\n`**literal**`",
     );
   });
+
+  it("escapes Slack control sequences in model prose", () => {
+    const rendered = toSlackMrkdwn(
+      "Ping <!channel> in <#C01> via <https://evil.example|docs>",
+    );
+    expect(rendered).toBe(
+      "Ping &lt;!channel&gt; in &lt;#C01&gt; via &lt;https://evil.example|docs&gt;",
+    );
+    expect(rendered).not.toMatch(/<[!#h]/u);
+  });
+
+  it("keeps generic types intact in prose and code", () => {
+    expect(toSlackMrkdwn("Returns Promise<string> and `Map<K, V>`")).toBe(
+      "Returns Promise&lt;string&gt; and `Map&lt;K, V&gt;`",
+    );
+    expect(toSlackMrkdwn("```\nconst x: Promise<string> = f();\n```")).toBe(
+      "```\nconst x: Promise&lt;string&gt; = f();\n```",
+    );
+  });
+
+  it("preserves existing entities instead of double-escaping them", () => {
+    expect(toSlackMrkdwn("a &amp; b & c &lt;tag&gt; &#169;")).toBe(
+      "a &amp; b &amp; c &lt;tag&gt; &#169;",
+    );
+  });
+
+  it("drops the info string from a fenced code block", () => {
+    expect(toSlackMrkdwn("```ts\nconst a = b && c;\n```")).toBe(
+      "```\nconst a = b &amp;&amp; c;\n```",
+    );
+  });
+
+  it("treats an unclosed streamed fence as code", () => {
+    expect(toSlackMrkdwn("Before\n```sh\n**not bold** <!here>")).toBe(
+      "Before\n```\n**not bold** &lt;!here&gt;",
+    );
+  });
+
+  it("escapes link URLs and rejects invalid ones", () => {
+    expect(toSlackMrkdwn("[q](https://example.com/?a=1&b=2)")).toBe(
+      "<https://example.com/?a=1&amp;b=2|q>",
+    );
+    expect(toSlackMrkdwn("[x](https://exa|mple.com)")).toBe(
+      "[x](https://exa|mple.com)",
+    );
+    expect(toSlackMrkdwn("[x](https://<!channel>)")).toBe(
+      "[x](https://&lt;!channel&gt;)",
+    );
+  });
+});
+
+describe("raw progress escaping", () => {
+  it("escapes the single-line query primary and argument keys", () => {
+    const transcript = new PiProgressTranscript("raw");
+    transcript.record(
+      event("tool_execution_start", {
+        toolCallId: "call-1",
+        toolName: "search",
+        args: { query: "<!channel> & co", "<!here>": "x<y" },
+      }),
+    );
+
+    const rendered = transcript.render("working");
+    expect(rendered).toContain("*Query*\n&lt;!channel&gt; &amp; co");
+    expect(rendered).toContain("• *&lt;!here&gt;:* `x&lt;y`");
+    expect(rendered).not.toContain("<!");
+  });
+
+  it("escapes the tail of a bounded working transcript", () => {
+    const transcript = new PiProgressTranscript();
+    transcript.record(
+      event("message_update", {
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: `${"x".repeat(20_000)} <!channel>`,
+        },
+      }),
+    );
+
+    const rendered = transcript.render("working");
+    expect(rendered.length).toBeLessThanOrEqual(3_500);
+    expect(rendered.endsWith("&lt;!channel&gt;")).toBe(true);
+  });
 });

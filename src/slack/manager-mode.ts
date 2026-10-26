@@ -1,5 +1,6 @@
 import { EMPTY_TURN_TEXT } from "../pi/turn-text.js";
 import type { IncomingSlackMessage } from "../routing/chat-key.js";
+import { neutralizeClosingTags } from "./mrkdwn.js";
 
 export const MANAGER_SILENT_RESPONSE = "<pi-slack-team-manager-silent/>";
 
@@ -55,7 +56,7 @@ export function managerObservationPrompt(
     metadata,
     "Observed Slack content:",
     "<untrusted_slack_content>",
-    slackContent,
+    neutralizeClosingTags(slackContent),
     "</untrusted_slack_content>",
   ].join("\n");
 }

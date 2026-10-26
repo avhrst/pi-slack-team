@@ -2,6 +2,7 @@ import type {
   IncomingSlackFile,
   IncomingSlackMessage,
 } from "../routing/chat-key.js";
+import { decodeSlackEntities } from "./mrkdwn.js";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object"
@@ -79,7 +80,12 @@ function parseEvent(
     (botProfile ? requiredString(botProfile, "app_id") : undefined);
   const ts = requiredString(event, "ts");
   const rawText = requiredString(event, "text");
-  const text = rawText === undefined ? undefined : textTransform(rawText);
+  // Transforms match Slack markup (`<@U…>`) on the raw text; decode exactly once
+  // afterwards so a human's `a && b` reaches Pi as typed.
+  const transformed = rawText === undefined ? undefined : textTransform(rawText);
+  const text = transformed === undefined
+    ? undefined
+    : decodeSlackEntities(transformed);
   if (
     !eventId ||
     !teamId ||
@@ -128,16 +134,20 @@ export function parseChannelMessageEvent(
   eventValue: unknown,
   botUserId?: string,
 ): IncomingSlackMessage | undefined {
-  const message = parseEvent(bodyValue, eventValue, "channel-message");
+  // The app_mention listener handles explicit requests and strips the mention.
+  // Checked on the raw text: a typed `&lt;@U…&gt;` is not a mention.
+  const message = parseEvent(
+    bodyValue,
+    eventValue,
+    "channel-message",
+    (text) =>
+      botUserId && text.includes(`<@${botUserId}>`) ? undefined : text,
+  );
   if (
     !message ||
     !["channel", "group"].includes(message.channelType) ||
     !["C", "G"].some((prefix) => message.channelId.startsWith(prefix))
   ) {
-    return undefined;
-  }
-  if (botUserId && message.text.includes(`<@${botUserId}>`)) {
-    // The app_mention listener handles explicit requests and strips the mention.
     return undefined;
   }
   return message;

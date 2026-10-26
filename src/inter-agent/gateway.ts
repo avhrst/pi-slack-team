@@ -7,6 +7,7 @@ import type { AgentConfig } from "../config/schema.js";
 import { interAgentSocketPath } from "./environment.js";
 import type { Logger } from "../observability/logger.js";
 import type { IncomingSlackMessage } from "../routing/chat-key.js";
+import { escapeSlackText } from "../slack/mrkdwn.js";
 import type { ConversationKey, Registry } from "../storage/registry.js";
 import {
   delegationRequestText,
@@ -374,7 +375,12 @@ export class InterAgentGateway {
       await sender({
         channelId: conversation.channelId,
         threadTs: conversation.threadTs,
-        text: delegationRequestText(peer.botUserId, delegationId, task),
+        // The worker decodes the body; the envelope header carries no entities.
+        text: delegationRequestText(
+          peer.botUserId,
+          delegationId,
+          escapeSlackText(task),
+        ),
       });
     } catch (error) {
       if (pending) {

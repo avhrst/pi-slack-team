@@ -148,4 +148,71 @@ describe("Slack event parsing", () => {
       ),
     ).toBeUndefined();
   });
+
+  it("decodes Slack entities for every event kind", () => {
+    const text = "a &amp;&amp; b &lt; c &gt; d &amp;lt;";
+    const decoded = "a && b < c > d &lt;";
+    expect(
+      parseMessageEvent(body, {
+        channel: "D01",
+        channel_type: "im",
+        user: "U01",
+        ts: "1.0",
+        text,
+      })?.text,
+    ).toBe(decoded);
+    expect(
+      parseChannelMessageEvent(body, {
+        channel: "C01",
+        channel_type: "channel",
+        user: "U01",
+        ts: "1.0",
+        text,
+      })?.text,
+    ).toBe(decoded);
+    expect(
+      parseAppMentionEvent(
+        body,
+        { channel: "C01", user: "U01", ts: "1.0", text: `<@UBOT> ${text}` },
+        "UBOT",
+      )?.text,
+    ).toBe(decoded);
+  });
+
+  it("does not treat a typed, escaped mention as a mention", () => {
+    expect(
+      parseChannelMessageEvent(
+        body,
+        {
+          channel: "C01",
+          channel_type: "channel",
+          user: "U01",
+          ts: "1.0",
+          text: "literal &lt;@UBOT&gt;",
+        },
+        "UBOT",
+      )?.text,
+    ).toBe("literal <@UBOT>");
+  });
+
+  it("decodes an envelope body without altering its header", () => {
+    expect(
+      parseAppMentionEvent(
+        body,
+        {
+          channel: "C01",
+          user: "UMANAGER",
+          ts: "123.456",
+          text:
+            "<@UBOT> [pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nrun a &amp;&amp; b",
+          bot_id: "BMANAGER",
+          app_id: "A02",
+        },
+        "UBOT",
+      )?.text,
+    ).toBe(
+      "[pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nrun a && b",
+    );
+  });
 });
+

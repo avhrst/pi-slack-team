@@ -1,6 +1,7 @@
 import { conversationKey, type IncomingSlackMessage } from "../routing/chat-key.js";
 import { serializeConversationKey } from "../routing/chat-key.js";
 import type { PiUiRequestContext } from "../pi/session-pool.js";
+import { escapeSlackText, unwrapSlackLinks } from "./mrkdwn.js";
 
 const DEFAULT_DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
 const MIN_DIALOG_TIMEOUT_MS = 1_000;
@@ -41,7 +42,10 @@ function requestText(
   channelId: string,
 ): string | undefined {
   const method = request.method;
-  const title = typeof request.title === "string" ? request.title.trim() : "Pi confirmation";
+  // Pi extensions may echo untrusted content into dialogs; none of it is markup.
+  const title = escapeSlackText(
+    typeof request.title === "string" ? request.title.trim() : "Pi confirmation",
+  );
   if (method === "select") {
     const options = Array.isArray(request.options)
       ? request.options.filter((option): option is string => typeof option === "string")
@@ -49,7 +53,7 @@ function requestText(
     if (options.length === 0) return undefined;
     return [
       `*${title}*`,
-      ...options.map((option, index) => `${index + 1}. ${option}`),
+      ...options.map((option, index) => `${index + 1}. ${escapeSlackText(option)}`),
       responseInstruction(channelId, "the option number or `cancel`"),
     ].join("\n");
   }
@@ -57,17 +61,23 @@ function requestText(
     const message = typeof request.message === "string" ? request.message.trim() : "";
     return [
       `*${title}*`,
-      message,
+      escapeSlackText(message),
       responseInstruction(channelId, "`yes`, `no`, or `cancel`"),
     ]
       .filter(Boolean)
       .join("\n");
   }
   if (method === "input" || method === "editor") {
+    const placeholder = typeof request.placeholder === "string"
+      ? request.placeholder.trim()
+      : "";
     return [
       `*${title}*`,
+      placeholder ? `_${escapeSlackText(placeholder)}_` : "",
       responseInstruction(channelId, "the requested value or `cancel`"),
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
   return undefined;
 }
@@ -160,7 +170,10 @@ export class SlackUiBroker {
         };
       }
       this.#resolve(key, pending, { value });
-      return { handled: true, acknowledgement: `Choice accepted: *${value}*` };
+      return {
+        handled: true,
+        acknowledgement: `Choice accepted: *${escapeSlackText(value)}*`,
+      };
     }
 
     if (pending.method === "confirm") {
@@ -181,7 +194,8 @@ export class SlackUiBroker {
     if (!answer) {
       return { handled: true, acknowledgement: "A non-empty response is required." };
     }
-    this.#resolve(key, pending, { value: answer });
+    // Slack auto-links typed URLs; Pi asked for the value the human typed.
+    this.#resolve(key, pending, { value: unwrapSlackLinks(answer) });
     return { handled: true, acknowledgement: "Response accepted." };
   }
 

@@ -191,4 +191,102 @@ describe("SlackUiBroker", () => {
     broker.cancelAll();
     await expect(pending).resolves.toEqual({ cancelled: true });
   });
+
+  it("escapes dialog text but matches the decoded reply against raw options", async () => {
+    const broker = new SlackUiBroker();
+    const post = vi.fn<(text: string) => Promise<void>>(async () => undefined);
+    const pending = broker.request(
+      {
+        conversation,
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-escape",
+          method: "select",
+          title: "Pick <!channel>",
+          options: ["A & B", "<b>"],
+          timeout: 300_000,
+        },
+        signal: new AbortController().signal,
+      },
+      post,
+    );
+
+    const posted = post.mock.calls[0]?.[0] ?? "";
+    expect(posted).toContain("*Pick &lt;!channel&gt;*");
+    expect(posted).toContain("1. A &amp; B");
+    expect(posted).toContain("2. &lt;b&gt;");
+    expect(posted).not.toContain("<!channel>");
+    // parse-event has already decoded `&lt;b&gt;` back to what the human typed.
+    expect(broker.consume(message("<b>"))).toMatchObject({
+      handled: true,
+      acknowledgement: "Choice accepted: *&lt;b&gt;*",
+    });
+    await expect(pending).resolves.toEqual({ value: "<b>" });
+  });
+
+  it("escapes confirm messages and input placeholders", async () => {
+    const broker = new SlackUiBroker();
+    const post = vi.fn<(text: string) => Promise<void>>(async () => undefined);
+    void broker.request(
+      {
+        conversation,
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-input",
+          method: "input",
+          title: "Value",
+          placeholder: "<@U02>",
+          timeout: 300_000,
+        },
+        signal: new AbortController().signal,
+      },
+      post,
+    );
+    expect(post.mock.calls[0]?.[0]).toContain("_&lt;@U02&gt;_");
+    broker.cancelAll();
+
+    void broker.request(
+      {
+        conversation,
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-confirm",
+          method: "confirm",
+          title: "Sure?",
+          message: "Drop <!everyone>",
+          timeout: 300_000,
+        },
+        signal: new AbortController().signal,
+      },
+      post,
+    );
+    expect(post.mock.calls[1]?.[0]).toContain("Drop &lt;!everyone&gt;");
+    broker.cancelAll();
+  });
+
+  it("unwraps Slack auto-links in input answers", async () => {
+    const broker = new SlackUiBroker();
+    const pending = broker.request(
+      {
+        conversation,
+        request: {
+          type: "extension_ui_request",
+          id: "dialog-url",
+          method: "input",
+          title: "URL",
+          timeout: 300_000,
+        },
+        signal: new AbortController().signal,
+      },
+      async () => undefined,
+    );
+
+    expect(
+      broker.consume(message("see <https://x.example/a?b=1|x.example/a>")),
+    ).toMatchObject({ handled: true });
+    await expect(pending).resolves.toEqual({
+      value: "see https://x.example/a?b=1",
+    });
+  });
 });
+

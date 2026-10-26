@@ -1,4 +1,5 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
+import { decodeSlackEntities, escapeSlackText } from "./mrkdwn.js";
 
 // Slack recommends keeping top-level message text below 4,000 characters.
 // Final answers are chunked separately; progress updates favor reliability.
@@ -44,12 +45,37 @@ function safeToolName(value: unknown): string {
     .slice(0, 80);
 }
 
+// The fence alternative also matches an unclosed fence, so a streamed code
+// block is never parsed as prose while its closing fence is still pending.
+const CODE_SEGMENT_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]+`)/gu;
+const MARKDOWN_LINK_RE = /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/gu;
+
+function slackLink(match: string, label: string, escapedUrl: string): string {
+  const url = decodeSlackEntities(escapedUrl);
+  if (/[<>|]/u.test(url)) return match;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return match;
+  } catch {
+    return match;
+  }
+  return `<${escapedUrl}|${label}>`;
+}
+
+/** Prose is escaped before any rule that emits Slack `<url|label>` markup. */
 function transformMarkdownSegment(text: string): string {
-  return text
+  return escapeSlackText(text)
     .replace(/^#{1,6}\s+(.+)$/gmu, "*$1*")
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/gu, "<$2|$1>")
+    .replace(MARKDOWN_LINK_RE, slackLink)
     .replace(/\*\*([^*\n]+)\*\*/gu, "*$1*")
     .replace(/__([^_\n]+)__/gu, "*$1*");
+}
+
+/** Slack has no syntax highlighting; an info string would render as code. */
+function transformCodeSegment(text: string): string {
+  if (!text.startsWith("```")) return escapeSlackText(text);
+  const body = text.slice(3).replace(/^[^\n`]*\n/u, "\n");
+  return `\`\`\`${escapeSlackText(body)}`;
 }
 
 function jsonText(value: unknown): string {
@@ -126,7 +152,7 @@ function deploymentProgress(value: unknown): string | undefined {
 }
 
 function inlineCode(value: string): string {
-  return `\`${value.replaceAll("`", "'")}\``;
+  return `\`${escapeSlackText(value.replaceAll("`", "'"))}\``;
 }
 
 function argumentValue(value: unknown): string {
@@ -166,20 +192,20 @@ function toolArguments(toolName: string, value: unknown): string {
           ? inlineCode(primary)
           : primary.includes("\n")
             ? codeBlock(primary)
-            : primary;
+            : escapeSlackText(primary);
     sections.push(`*${labels[primaryKey]}*\n${rendered}`);
   }
 
   const details = entries
     .filter(([key]) => key !== primaryKey)
-    .map(([key, item]) => `• *${key}:* ${argumentValue(item)}`);
+    .map(([key, item]) => `• *${escapeSlackText(key)}:* ${argumentValue(item)}`);
   if (details.length > 0) sections.push(details.join("\n"));
   if (sections.length > 0) return sections.join("\n");
   return `*Tool:* ${inlineCode(toolName)}`;
 }
 
 function codeBlock(text: string): string {
-  const escaped = text.replaceAll("```", "``\u200b`");
+  const escaped = escapeSlackText(text.replaceAll("```", "``\u200b`"));
   const bounded =
     escaped.length <= MAX_TOOL_SECTION_CHARS
       ? escaped
@@ -187,11 +213,14 @@ function codeBlock(text: string): string {
   return `\`\`\`\n${bounded}\n\`\`\``;
 }
 
+/** Renders untrusted model Markdown as Slack mrkdwn with no control sequences. */
 export function toSlackMrkdwn(text: string): string {
   return text
-    .split(/(```[\s\S]*?```|`[^`\n]+`)/gu)
+    .split(CODE_SEGMENT_RE)
     .map((segment) =>
-      segment.startsWith("`") ? segment : transformMarkdownSegment(segment),
+      segment.startsWith("`")
+        ? transformCodeSegment(segment)
+        : transformMarkdownSegment(segment),
     )
     .join("");
 }

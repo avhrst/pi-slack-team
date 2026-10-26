@@ -94,6 +94,8 @@ export class SlackBridge {
     );
     this.#interAgent.setSlackSender(async (message) => {
       await this.#app.client.chat.postMessage({
+        unfurl_links: false,
+        unfurl_media: false,
         channel: message.channelId,
         thread_ts: message.threadTs,
         text: message.text,
@@ -157,6 +159,8 @@ export class SlackBridge {
     }
     return this.#uiBroker.request(context, async (text) => {
       await this.#app.client.chat.postMessage({
+        unfurl_links: false,
+        unfurl_media: false,
         channel: context.conversation.channelId,
         thread_ts: context.conversation.threadTs,
         text,
@@ -223,6 +227,8 @@ export class SlackBridge {
     }
     if (uiResult.acknowledgement) {
       await client.chat.postMessage({
+        unfurl_links: false,
+        unfurl_media: false,
         channel: message.channelId,
         thread_ts: message.threadTs ?? message.ts,
         text: uiResult.acknowledgement,
@@ -285,6 +291,8 @@ export class SlackBridge {
           onAccepted: async () => {
             if (managerObservation) return;
             const posted = await client.chat.postMessage({
+              unfurl_links: false,
+              unfurl_media: false,
               channel: message.channelId,
               thread_ts: message.threadTs ?? message.ts,
               text: this.#config.pi.transport === "tmux"
@@ -423,6 +431,8 @@ export class SlackBridge {
     try {
       for (const text of texts) {
         await client.chat.postMessage({
+          unfurl_links: false,
+          unfurl_media: false,
           channel: message.channelId,
           thread_ts: message.threadTs ?? message.ts,
           text,
@@ -448,6 +458,8 @@ export class SlackBridge {
       } else {
         await client.chat
           .postMessage({
+            unfurl_links: false,
+            unfurl_media: false,
             channel: message.channelId,
             thread_ts: message.threadTs ?? message.ts,
             text: notice,
@@ -480,6 +492,8 @@ export class SlackBridge {
     )) {
       await client.chat
         .postMessage({
+          unfurl_links: false,
+          unfurl_media: false,
           channel: message.channelId,
           thread_ts: message.threadTs ?? message.ts,
           text,

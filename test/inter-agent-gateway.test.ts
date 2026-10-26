@@ -123,6 +123,23 @@ describe("InterAgentGateway", () => {
     registry.close();
   });
 
+  it("escapes the task body without altering the envelope header", async () => {
+    const { conversation, gateway, registry } = setup();
+    const sent: DelegationSlackMessage[] = [];
+    gateway.setSlackSender(async (message) => {
+      sent.push(message);
+      gateway.acceptResponse(response(delegationId(message)));
+    });
+
+    await gateway.delegate(conversation, "specialist", "Tell <!channel> a & b");
+    const id = delegationId(sent[0]!);
+    expect(sent[0]?.text).toBe(
+      `<@UWORKER> [pi-slack-team:v1:request:${id}]\nTell &lt;!channel&gt; a &amp; b`,
+    );
+    await gateway.stop();
+    registry.close();
+  });
+
   it("propagates an explicit worker failure", async () => {
     const { conversation, gateway, registry } = setup();
     gateway.setSlackSender(async (message) => {
