@@ -12,6 +12,11 @@ import { SlackBridge } from "./slack/slack-bridge.js";
 import { Registry } from "./storage/registry.js";
 import { TmuxAgentRunner } from "./tmux/agent-runner.js";
 
+// Slack retries a delivery for minutes, not days; older event IDs only cost disk.
+const PROCESSED_EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+const PROCESSED_EVENT_PRUNE_INTERVAL_MS = 60 * 60 * 1_000;
+const TMUX_HEALTH_INTERVAL_MS = 5_000;
+
 function usage(): never {
   process.stderr.write(
     "Usage: pi-slack-team <start|doctor> --config /absolute/path/agent.yaml\n",
@@ -43,16 +48,36 @@ async function start(configPath: string): Promise<void> {
   const chatService = new ChatService(config, registry, pool, logger);
   let stopping = false;
   let healthTimer: NodeJS.Timeout | undefined;
+  let pruneTimer: NodeJS.Timeout | undefined;
+
+  const pruneEvents = () => {
+    try {
+      const removed = registry.pruneEvents(
+        new Date(Date.now() - PROCESSED_EVENT_RETENTION_MS),
+      );
+      if (removed > 0) {
+        logger.info("processed_events_pruned", { agentId: config.agentId, removed });
+      }
+    } catch (error) {
+      logger.warn("processed_events_prune_failed", { agentId: config.agentId, error });
+    }
+  };
 
   const shutdown = async (signal: string) => {
     if (stopping) return;
     stopping = true;
     if (healthTimer) clearInterval(healthTimer);
+    if (pruneTimer) clearInterval(pruneTimer);
     logger.info("runtime_stopping", { agentId: config.agentId, signal });
     await bridge.stop().catch(() => undefined);
     await interAgent.stop().catch(() => undefined);
-    await pool.shutdown();
-    registry.close();
+    try {
+      await pool.shutdown();
+    } catch (error) {
+      logger.error("pi_pool_shutdown_failed", { agentId: config.agentId, error });
+    } finally {
+      registry.close();
+    }
   };
 
   const failRuntime = (error: Error) => {
@@ -86,13 +111,22 @@ async function start(configPath: string): Promise<void> {
   });
 
   try {
+    pruneEvents();
+    pruneTimer = setInterval(pruneEvents, PROCESSED_EVENT_PRUNE_INTERVAL_MS);
+    pruneTimer.unref();
     if (pool instanceof TmuxAgentRunner) await pool.start();
     await interAgent.start();
     await bridge.start();
     if (pool instanceof TmuxAgentRunner) {
+      let healthCheckRunning = false;
       healthTimer = setInterval(() => {
-        void pool.health().catch(() => failRuntime(new Error("tmux agent is no longer healthy")));
-      }, 5_000);
+        // A slow tmux server must not pile up overlapping health probes.
+        if (healthCheckRunning) return;
+        healthCheckRunning = true;
+        void pool.health()
+          .catch(() => failRuntime(new Error("tmux agent is no longer healthy")))
+          .finally(() => { healthCheckRunning = false; });
+      }, TMUX_HEALTH_INTERVAL_MS);
       healthTimer.unref();
     }
   } catch (error) {

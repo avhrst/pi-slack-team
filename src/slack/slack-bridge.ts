@@ -17,6 +17,7 @@ import {
   serializeConversationKey,
   type IncomingSlackMessage,
 } from "../routing/chat-key.js";
+import { chunkSlackText } from "./chunk-text.js";
 import { SlackConnectionMonitor } from "./connection-monitor.js";
 import { downloadSlackFiles } from "./file-download.js";
 import {
@@ -34,16 +35,7 @@ import { SlackProgressReporter } from "./progress-reporter.js";
 import { SlackUiBroker } from "./slack-ui.js";
 import { addSlackThreadContext } from "./thread-context.js";
 
-const SLACK_CHUNK_LIMIT = 38_000;
 const SLACK_PROGRESS_REQUEST_TIMEOUT_MS = 15_000;
-function chunks(text: string): string[] {
-  if (text.length <= SLACK_CHUNK_LIMIT) return [text];
-  const result: string[] = [];
-  for (let offset = 0; offset < text.length; offset += SLACK_CHUNK_LIMIT) {
-    result.push(text.slice(offset, offset + SLACK_CHUNK_LIMIT));
-  }
-  return result;
-}
 
 export class SlackBridge {
   readonly #config: AgentConfig;
@@ -347,7 +339,7 @@ export class SlackBridge {
       const renderedResponse = toSlackMrkdwn(responseText);
       const outputChunks = delegatedRequest
         ? delegationResponseMessages(delegatedRequest, renderedResponse)
-        : chunks(renderedResponse);
+        : chunkSlackText(renderedResponse);
       if (outputChunks.length === 0) {
         outputChunks.push("Pi completed without a text response.");
       }

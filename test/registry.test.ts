@@ -34,6 +34,17 @@ describe("Registry", () => {
     registry.close();
   });
 
+  it("prunes processed events older than the cutoff", () => {
+    const registry = createRegistry();
+    registry.claimEvent("EvOld", new Date("2026-01-01T00:00:00.000Z"));
+    registry.claimEvent("EvNew", new Date("2026-01-10T00:00:00.000Z"));
+
+    expect(registry.pruneEvents(new Date("2026-01-05T00:00:00.000Z"))).toBe(1);
+    expect(registry.claimEvent("EvOld")).toBe(true);
+    expect(registry.claimEvent("EvNew")).toBe(false);
+    registry.close();
+  });
+
   it("transfers an idle conversation owner with compare-and-set semantics", () => {
     const registry = createRegistry();
     const channelKey = { ...key, channelId: "C01" };

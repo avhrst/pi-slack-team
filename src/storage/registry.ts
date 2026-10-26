@@ -133,6 +133,9 @@ export class Registry {
         processed_at TEXT NOT NULL
       ) STRICT;
 
+      CREATE INDEX IF NOT EXISTS processed_events_processed_at
+        ON processed_events (processed_at);
+
       CREATE TABLE IF NOT EXISTS pending_actions (
         action_id TEXT PRIMARY KEY,
         team_id TEXT NOT NULL,
@@ -151,8 +154,7 @@ export class Registry {
       "SELECT sql FROM sqlite_master WHERE name = 'pi_sessions'",
     ).get() as { sql: string };
     if (!sessionTable.sql.includes("'agent'")) {
-      this.#database.exec(`
-        BEGIN IMMEDIATE;
+      this.#transaction(() => this.#database.exec(`
         ALTER TABLE pi_sessions RENAME TO pi_sessions_legacy;
         CREATE TABLE pi_sessions (
           session_key TEXT PRIMARY KEY,
@@ -164,8 +166,7 @@ export class Registry {
         ) STRICT;
         INSERT INTO pi_sessions SELECT * FROM pi_sessions_legacy;
         DROP TABLE pi_sessions_legacy;
-        COMMIT;
-      `);
+      `));
     }
 
     const columns = this.#database
@@ -205,32 +206,46 @@ export class Registry {
       UPDATE conversations SET session_key = ?
        WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
     `);
-    for (const row of legacyRows) {
-      const key: ConversationKey = {
-        teamId: row.team_id,
-        appId: row.app_id,
-        channelId: row.channel_id,
-        threadTs: row.thread_ts,
-      };
-      const session = piSessionKey(key, row.owner_user_id);
-      const serialized = serializePiSessionKey(session);
-      upsertSession.run(
-        serialized,
-        session.scope,
-        row.owner_user_id,
-        row.pi_session_file,
-        row.pi_session_id,
-        row.status,
-        row.created_at,
-        row.last_activity_at,
-      );
-      bindConversation.run(
-        serialized,
-        row.team_id,
-        row.app_id,
-        row.channel_id,
-        row.thread_ts,
-      );
+    if (legacyRows.length === 0) return;
+    this.#transaction(() => {
+      for (const row of legacyRows) {
+        const key: ConversationKey = {
+          teamId: row.team_id,
+          appId: row.app_id,
+          channelId: row.channel_id,
+          threadTs: row.thread_ts,
+        };
+        const session = piSessionKey(key, row.owner_user_id);
+        const serialized = serializePiSessionKey(session);
+        upsertSession.run(
+          serialized,
+          session.scope,
+          row.owner_user_id,
+          row.pi_session_file,
+          row.pi_session_id,
+          row.status,
+          row.created_at,
+          row.last_activity_at,
+        );
+        bindConversation.run(
+          serialized,
+          row.team_id,
+          row.app_id,
+          row.channel_id,
+          row.thread_ts,
+        );
+      }
+    });
+  }
+
+  #transaction(operation: () => void): void {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      operation();
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
     }
   }
 
