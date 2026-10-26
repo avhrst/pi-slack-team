@@ -56,6 +56,16 @@ describe("PiProgressTranscript", () => {
     expect(rendered).not.toContain("secret output");
   });
 
+  it("reports the first agent start once so a queued placeholder turns into working", () => {
+    const transcript = new PiProgressTranscript();
+
+    expect(transcript.record(event("agent_start"))).toBe(true);
+    expect(transcript.record(event("agent_start"))).toBe(false);
+    expect(transcript.render("working")).toBe(
+      ":hourglass_flowing_sand: *Pi is working…*",
+    );
+  });
+
   it("removes the duplicated final answer from completed progress", () => {
     const transcript = new PiProgressTranscript();
     transcript.record(

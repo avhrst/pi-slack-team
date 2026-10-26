@@ -224,4 +224,62 @@ describe("SlackProgressReporter", () => {
       vi.useRealTimers();
     }
   });
+
+  it("does not degrade raw progress on a rate limit", async () => {
+    const updates: string[] = [];
+    let calls = 0;
+    const update = vi.fn(async (text: string) => {
+      updates.push(text);
+      calls += 1;
+      if (calls === 1) throw rateLimited();
+    });
+    const reporter = new SlackProgressReporter("raw", update, () => undefined);
+
+    rawToolEvents(reporter);
+    await reporter.complete("Completed result");
+
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(updates[1]).toContain(":white_check_mark: *Pi completed*");
+    expect(updates[1]).toContain("detailed tool output");
+  });
+
+  it("retries the final update until Slack accepts it", async () => {
+    const errors: ProgressUpdateAttempt[] = [];
+    let calls = 0;
+    const update = vi.fn(async () => {
+      calls += 1;
+      if (calls < 3) throw rateLimited();
+    });
+    const reporter = new SlackProgressReporter(
+      "summary",
+      update,
+      (_error, attempt) => errors.push(attempt),
+    );
+
+    await reporter.complete("Completed result");
+
+    expect(update).toHaveBeenCalledTimes(3);
+    expect(update).toHaveBeenLastCalledWith(
+      expect.stringContaining(":white_check_mark: *Pi completed*"),
+    );
+    expect(errors).toEqual(["configured", "configured"]);
+  });
+
+  it("gives up on the final update after bounded transient retries", async () => {
+    const update = vi.fn(async () => {
+      throw rateLimited();
+    });
+    const reporter = new SlackProgressReporter("summary", update, () => undefined);
+
+    await reporter.complete("Completed result");
+
+    expect(update).toHaveBeenCalledTimes(3);
+  });
 });
+
+function rateLimited(): Error {
+  return Object.assign(new Error("A rate limit was exceeded"), {
+    code: "slack_webapi_rate_limited_error",
+    retryAfter: 0,
+  });
+}

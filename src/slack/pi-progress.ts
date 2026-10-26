@@ -204,6 +204,7 @@ export class PiProgressTranscript {
   readonly #rawTools = new Map<string, RawToolEntry>();
   #anonymousToolSequence = 0;
   #textBoundary = false;
+  #started = false;
   #deploymentStatus: string | undefined;
 
   constructor(mode: ProgressMode = "summary") {
@@ -211,6 +212,14 @@ export class PiProgressTranscript {
   }
 
   record(event: RpcRecord): boolean {
+    // The first start replaces the "queued" placeholder even when the turn
+    // streams no text or tools (tmux forwards neither text deltas nor thinking).
+    if (event.type === "agent_start") {
+      if (this.#started) return false;
+      this.#started = true;
+      return true;
+    }
+
     if (event.type === "message_update") {
       const update = asRecord(event.assistantMessageEvent);
       if (update?.type !== "text_delta" || typeof update.delta !== "string") {

@@ -1,3 +1,4 @@
+import { EMPTY_TURN_TEXT } from "../pi/turn-text.js";
 import type { IncomingSlackMessage } from "../routing/chat-key.js";
 
 export const MANAGER_SILENT_RESPONSE = "<pi-slack-team-manager-silent/>";
@@ -59,7 +60,13 @@ export function managerObservationPrompt(
   ].join("\n");
 }
 
+/**
+ * Ambient observations stay silent unless the manager produced a real reply.
+ * A marker anywhere signals the model chose silence; posting the surrounding
+ * text would leak the raw tag and the chatter the marker exists to suppress.
+ */
 export function managerVisibleResponse(text: string): string | undefined {
   const trimmed = text.trim();
-  return trimmed === MANAGER_SILENT_RESPONSE ? undefined : trimmed;
+  if (!trimmed || trimmed === EMPTY_TURN_TEXT) return undefined;
+  return trimmed.includes(MANAGER_SILENT_RESPONSE) ? undefined : trimmed;
 }

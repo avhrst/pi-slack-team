@@ -6,6 +6,8 @@ import { Type } from "typebox";
 import { loadConfig } from "../config/load-config.js";
 import { matchAutomaticSelect } from "../pi/ui-policy.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
+import { EMPTY_TURN_TEXT } from "../pi/turn-text.js";
+import { RunEventWindow } from "./event-window.js";
 import { TmuxMailbox, bufferName, tmuxSocketPath } from "./mailbox.js";
 import { peerResponseSchema, requestPrompt, runRequestSchema, type RunRequest, type RunResult } from "./protocol.js";
 
@@ -28,8 +30,7 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
   let loop: Promise<void> | undefined;
   let restoreUi: (() => void) | undefined;
   let restoreSender: (() => void) | undefined;
-  let events: Array<{ sequence: number; event: RpcRecord }> = [];
-  let sequence = 0;
+  const events = new RunEventWindow();
   let dirty = false;
   const localQueue: string[] = [];
 
@@ -50,8 +51,7 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
       isError: event.isError,
       result: { content: [{ type: "text", text: "Large tool result omitted from transport; inspect the agent terminal." }] },
     };
-    events.push({ sequence: ++sequence, event: safeEvent });
-    events = events.slice(-16);
+    events.push(safeEvent);
     dirty = true;
   };
   const finish = async (request: RunRequest, ok: boolean, text: string) => {
@@ -195,7 +195,7 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
         }
         if (dirty) {
           dirty = false;
-          await mailbox.put(bufferName("events", request.id), { events }, false);
+          await mailbox.put(bufferName("events", request.id), { events: events.events }, false);
         }
       } else if (context.isIdle() && !context.hasPendingMessages()) {
         const queued = names.filter((name) => name.startsWith("pst-run-"));
@@ -236,8 +236,7 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
     lastText = "";
     lastError = undefined;
     cancelled = false;
-    events = [];
-    sequence = 0;
+    events.reset();
     context.ui.setStatus("tmux-team", `${config.agentId} · ${request.fromAgent ?? request.origin.kind} · ${request.id.slice(0, 8)}`);
     await mailbox.put(bufferName("accepted", request.id), { id: request.id, instanceId });
     try { pi.sendUserMessage(activePrompt); }
@@ -276,7 +275,7 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
   pi.on("agent_settled", async () => {
     const request = active;
     if (!request) return;
-    await finishActive(request, !lastError, lastError ?? (lastText.trim() || "Pi completed without a text response."));
+    await finishActive(request, !lastError, lastError ?? (lastText.trim() || EMPTY_TURN_TEXT));
   });
   const noSwitch = () => {
     context.ui.notify("Managed agent uses one persistent session. Session switching/forking is disabled.", "warning");

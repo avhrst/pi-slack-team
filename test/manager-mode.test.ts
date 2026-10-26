@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EMPTY_TURN_TEXT } from "../src/pi/turn-text.js";
 import type { IncomingSlackMessage } from "../src/routing/chat-key.js";
 import {
   MANAGER_SILENT_RESPONSE,
@@ -43,6 +44,14 @@ describe("manager mode", () => {
     expect(managerVisibleResponse("Created WH-42 to track the regression.")).toBe(
       "Created WH-42 to track the regression.",
     );
+  });
+
+  it("stays silent for empty turns and marker-bearing replies", () => {
+    expect(managerVisibleResponse(EMPTY_TURN_TEXT)).toBeUndefined();
+    expect(managerVisibleResponse("   ")).toBeUndefined();
+    expect(
+      managerVisibleResponse(`No action needed. ${MANAGER_SILENT_RESPONSE}`),
+    ).toBeUndefined();
   });
 
   it("includes attachment metadata without private download URLs", () => {

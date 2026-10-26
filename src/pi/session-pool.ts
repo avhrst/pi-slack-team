@@ -19,6 +19,7 @@ import {
   type PiSessionKey,
 } from "../routing/session-key.js";
 import { RpcClient, type RpcRecord } from "./rpc-client.js";
+import { EMPTY_TURN_TEXT } from "./turn-text.js";
 import type { RpcClientOptions } from "./rpc-client.js";
 
 export interface PiTurnResult {
@@ -180,7 +181,7 @@ export class PiSessionPool {
             text:
               typeof value === "string" && value.trim()
                 ? value
-                : "Pi completed without a text response.",
+                : EMPTY_TURN_TEXT,
             sessionFile: handle.sessionFile,
             sessionId: handle.sessionId,
           };
