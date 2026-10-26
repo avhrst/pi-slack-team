@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync, type StatementResultingChanges } from "node:sqlite";
+import {
+  DatabaseSync,
+  type StatementResultingChanges,
+  type StatementSync,
+} from "node:sqlite";
 import {
   piSessionKey,
   serializePiSessionKey,
@@ -91,6 +95,8 @@ function toRecord(row: ConversationRow): ConversationRecord {
 
 export class Registry {
   readonly #database: DatabaseSync;
+  // Hot-path queries run per Slack message; compile each SQL text once.
+  readonly #statements = new Map<string, StatementSync>();
 
   constructor(databasePath: string) {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
@@ -250,52 +256,45 @@ export class Registry {
   }
 
   claimEvent(eventId: string, now = new Date()): boolean {
-    const result: StatementResultingChanges = this.#database
-      .prepare(
-        "INSERT OR IGNORE INTO processed_events (event_id, processed_at) VALUES (?, ?)",
-      )
-      .run(eventId, now.toISOString());
+    const result: StatementResultingChanges = this.#statement(
+      "INSERT OR IGNORE INTO processed_events (event_id, processed_at) VALUES (?, ?)",
+    ).run(eventId, now.toISOString());
     return result.changes === 1;
   }
 
   pruneEvents(before: Date): number {
-    const result = this.#database
-      .prepare("DELETE FROM processed_events WHERE processed_at < ?")
+    const result = this.#statement("DELETE FROM processed_events WHERE processed_at < ?")
       .run(before.toISOString());
     return Number(result.changes);
   }
 
   getConversation(key: ConversationKey): ConversationRecord | undefined {
-    const row = this.#database
-      .prepare(
-        `SELECT c.team_id, c.app_id, c.channel_id, c.thread_ts, c.owner_user_id,
-                c.session_key,
-                COALESCE(s.pi_session_file, c.pi_session_file) AS pi_session_file,
-                COALESCE(s.pi_session_id, c.pi_session_id) AS pi_session_id,
-                COALESCE(s.status, c.status) AS status,
-                c.created_at,
-                COALESCE(s.last_activity_at, c.last_activity_at) AS last_activity_at
-           FROM conversations c
-           LEFT JOIN pi_sessions s ON s.session_key = c.session_key
-          WHERE c.team_id = ? AND c.app_id = ? AND c.channel_id = ? AND c.thread_ts = ?`,
-      )
-      .get(
-        key.teamId,
-        key.appId,
-        key.channelId,
-        key.threadTs,
-      ) as ConversationRow | undefined;
+    const row = this.#statement(
+      `SELECT c.team_id, c.app_id, c.channel_id, c.thread_ts, c.owner_user_id,
+              c.session_key,
+              COALESCE(s.pi_session_file, c.pi_session_file) AS pi_session_file,
+              COALESCE(s.pi_session_id, c.pi_session_id) AS pi_session_id,
+              COALESCE(s.status, c.status) AS status,
+              c.created_at,
+              COALESCE(s.last_activity_at, c.last_activity_at) AS last_activity_at
+         FROM conversations c
+         LEFT JOIN pi_sessions s ON s.session_key = c.session_key
+        WHERE c.team_id = ? AND c.app_id = ? AND c.channel_id = ? AND c.thread_ts = ?`,
+    ).get(
+      key.teamId,
+      key.appId,
+      key.channelId,
+      key.threadTs,
+    ) as ConversationRow | undefined;
     return row ? toRecord(row) : undefined;
   }
 
   getPiSession(sessionKey: string): PiSessionRecord | undefined {
-    const row = this.#database
-      .prepare(
-        `SELECT session_key, scope, owner_user_id, pi_session_file,
-                pi_session_id, status, created_at, last_activity_at
-           FROM pi_sessions WHERE session_key = ?`,
-      )
-      .get(sessionKey) as PiSessionRow | undefined;
+    const row = this.#statement(
+      `SELECT session_key, scope, owner_user_id, pi_session_file,
+              pi_session_id, status, created_at, last_activity_at
+         FROM pi_sessions WHERE session_key = ?`,
+    ).get(sessionKey) as PiSessionRow | undefined;
     return row ? toSessionRecord(row) : undefined;
   }
 
@@ -307,30 +306,26 @@ export class Registry {
     const timestamp = now.toISOString();
     const session = piSessionKey(key, ownerUserId);
     const sessionKey = serializePiSessionKey(session);
-    this.#database
-      .prepare(
-        `INSERT OR IGNORE INTO pi_sessions (
-           session_key, scope, owner_user_id, status, created_at, last_activity_at
-         ) VALUES (?, ?, ?, 'starting', ?, ?)`,
-      )
-      .run(sessionKey, session.scope, ownerUserId, timestamp, timestamp);
-    this.#database
-      .prepare(
-        `INSERT OR IGNORE INTO conversations (
-           team_id, app_id, channel_id, thread_ts, owner_user_id, session_key,
-           status, created_at, last_activity_at
-         ) VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
-      )
-      .run(
-        key.teamId,
-        key.appId,
-        key.channelId,
-        key.threadTs,
-        ownerUserId,
-        sessionKey,
-        timestamp,
-        timestamp,
-      );
+    this.#statement(
+      `INSERT OR IGNORE INTO pi_sessions (
+         session_key, scope, owner_user_id, status, created_at, last_activity_at
+       ) VALUES (?, ?, ?, 'starting', ?, ?)`,
+    ).run(sessionKey, session.scope, ownerUserId, timestamp, timestamp);
+    this.#statement(
+      `INSERT OR IGNORE INTO conversations (
+         team_id, app_id, channel_id, thread_ts, owner_user_id, session_key,
+         status, created_at, last_activity_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
+    ).run(
+      key.teamId,
+      key.appId,
+      key.channelId,
+      key.threadTs,
+      ownerUserId,
+      sessionKey,
+      timestamp,
+      timestamp,
+    );
 
     const conversation = this.getConversation(key);
     if (!conversation) throw new Error("Failed to create conversation");
@@ -346,49 +341,45 @@ export class Registry {
     newOwnerUserId: string,
     now = new Date(),
   ): ConversationRecord | undefined {
-    const result = this.#database
-      .prepare(
-        `UPDATE conversations
-            SET owner_user_id = ?, last_activity_at = ?
-          WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
-            AND owner_user_id = ?
-            AND COALESCE(
-              (SELECT status FROM pi_sessions
-                WHERE session_key = conversations.session_key),
-              status
-            ) IN ('idle', 'error')`,
-      )
-      .run(
-        newOwnerUserId,
-        now.toISOString(),
-        key.teamId,
-        key.appId,
-        key.channelId,
-        key.threadTs,
-        expectedOwnerUserId,
-      );
+    const result = this.#statement(
+      `UPDATE conversations
+          SET owner_user_id = ?, last_activity_at = ?
+        WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
+          AND owner_user_id = ?
+          AND COALESCE(
+            (SELECT status FROM pi_sessions
+              WHERE session_key = conversations.session_key),
+            status
+          ) IN ('idle', 'error')`,
+    ).run(
+      newOwnerUserId,
+      now.toISOString(),
+      key.teamId,
+      key.appId,
+      key.channelId,
+      key.threadTs,
+      expectedOwnerUserId,
+    );
     if (result.changes !== 1) return undefined;
     const conversation = this.getConversation(key);
     if (!conversation) return undefined;
-    this.#database
-      .prepare(
-        `UPDATE pi_sessions
-            SET owner_user_id = ?, last_activity_at = ?
-          WHERE session_key = ?`,
-      )
-      .run(newOwnerUserId, now.toISOString(), conversation.sessionKey);
+    this.#statement(
+      `UPDATE pi_sessions
+          SET owner_user_id = ?, last_activity_at = ?
+        WHERE session_key = ?`,
+    ).run(newOwnerUserId, now.toISOString(), conversation.sessionKey);
     return this.getConversation(key);
   }
 
   bindAgentSession(key: ConversationKey, sessionFile: string, sessionId: string): void {
     const sessionKey = `agent:${key.teamId}:${key.appId}`;
     const now = new Date().toISOString();
-    this.#database.prepare(`
+    this.#statement(`
       INSERT OR IGNORE INTO pi_sessions
         (session_key, scope, owner_user_id, status, created_at, last_activity_at)
       VALUES (?, 'agent', '', 'idle', ?, ?)
     `).run(sessionKey, now, now);
-    this.#database.prepare(`
+    this.#statement(`
       UPDATE conversations SET session_key = ?
       WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
     `).run(sessionKey, key.teamId, key.appId, key.channelId, key.threadTs);
@@ -404,30 +395,26 @@ export class Registry {
     const conversation = this.getConversation(key);
     if (!conversation) throw new Error("Conversation does not exist");
     const timestamp = now.toISOString();
-    this.#database
-      .prepare(
-        `UPDATE pi_sessions
-            SET pi_session_file = ?, pi_session_id = ?, status = 'idle',
-                last_activity_at = ?
-          WHERE session_key = ?`,
-      )
-      .run(sessionFile, sessionId, timestamp, conversation.sessionKey);
-    this.#database
-      .prepare(
-        `UPDATE conversations
-            SET pi_session_file = ?, pi_session_id = ?, status = 'idle',
-                last_activity_at = ?
-          WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?`,
-      )
-      .run(
-        sessionFile,
-        sessionId,
-        timestamp,
-        key.teamId,
-        key.appId,
-        key.channelId,
-        key.threadTs,
-      );
+    this.#statement(
+      `UPDATE pi_sessions
+          SET pi_session_file = ?, pi_session_id = ?, status = 'idle',
+              last_activity_at = ?
+        WHERE session_key = ?`,
+    ).run(sessionFile, sessionId, timestamp, conversation.sessionKey);
+    this.#statement(
+      `UPDATE conversations
+          SET pi_session_file = ?, pi_session_id = ?, status = 'idle',
+              last_activity_at = ?
+        WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?`,
+    ).run(
+      sessionFile,
+      sessionId,
+      timestamp,
+      key.teamId,
+      key.appId,
+      key.channelId,
+      key.threadTs,
+    );
   }
 
   setStatus(
@@ -438,29 +425,35 @@ export class Registry {
     const conversation = this.getConversation(key);
     if (!conversation) throw new Error("Conversation does not exist");
     const timestamp = now.toISOString();
-    this.#database
-      .prepare(
-        `UPDATE pi_sessions SET status = ?, last_activity_at = ?
-          WHERE session_key = ?`,
-      )
-      .run(status, timestamp, conversation.sessionKey);
-    this.#database
-      .prepare(
-        `UPDATE conversations
-            SET status = ?, last_activity_at = ?
-          WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?`,
-      )
-      .run(
-        status,
-        timestamp,
-        key.teamId,
-        key.appId,
-        key.channelId,
-        key.threadTs,
-      );
+    this.#statement(
+      `UPDATE pi_sessions SET status = ?, last_activity_at = ?
+        WHERE session_key = ?`,
+    ).run(status, timestamp, conversation.sessionKey);
+    this.#statement(
+      `UPDATE conversations
+          SET status = ?, last_activity_at = ?
+        WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?`,
+    ).run(
+      status,
+      timestamp,
+      key.teamId,
+      key.appId,
+      key.channelId,
+      key.threadTs,
+    );
+  }
+
+  #statement(sql: string): StatementSync {
+    let statement = this.#statements.get(sql);
+    if (!statement) {
+      statement = this.#database.prepare(sql);
+      this.#statements.set(sql, statement);
+    }
+    return statement;
   }
 
   close(): void {
+    this.#statements.clear();
     this.#database.close();
   }
 }

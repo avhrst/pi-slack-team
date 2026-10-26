@@ -115,6 +115,7 @@ The YAML schema rejects unknown keys. Required top-level fields are `version: 1`
 | `slack.fileUploads` | `false` | Download authorized attachments only when enabled |
 | `slack.maxFileBytes` | `20971520` | 20 MiB per file; maximum 100 MiB |
 | `slack.maxFilesPerMessage` | `5` | Maximum 10 |
+| `slack.uploadRetentionDays` | `7` | Downloaded attachments older than this are deleted; 1–365 |
 | `interAgent.requestTimeoutMs` | `900000` | Delegation including queue time; 10 seconds–1 hour |
 | `interAgent.maxTaskChars` | `30000` | Maximum 37,000 |
 | `interAgent.maxResponseChars` | `50000` | Maximum 100,000 |

@@ -50,6 +50,7 @@ describe("agent config", () => {
     expect(config.slack.fileUploads).toBe(false);
     expect(config.slack.maxFileBytes).toBe(20 * 1_024 * 1_024);
     expect(config.slack.maxFilesPerMessage).toBe(5);
+    expect(config.slack.uploadRetentionDays).toBe(7);
     expect(config.pi.command).toBe("/usr/bin/pi");
     expect(config.pi.maxActiveSessions).toBeUndefined();
     expect(config.pi.maxConcurrentTurns).toBe(4);

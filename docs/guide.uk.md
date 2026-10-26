@@ -115,6 +115,7 @@ SQLite не є сховищем облікових даних. Історія, �
 | `slack.fileUploads` | `false` | Завантажувати дозволені вкладення лише після увімкнення |
 | `slack.maxFileBytes` | `20971520` | 20 MiB на файл; максимум 100 MiB |
 | `slack.maxFilesPerMessage` | `5` | Максимум 10 |
+| `slack.uploadRetentionDays` | `7` | Завантажені вкладення, старші за цей строк, видаляються; 1–365 |
 | `interAgent.requestTimeoutMs` | `900000` | Делегування разом із часом у черзі; 10 секунд–1 година |
 | `interAgent.maxTaskChars` | `30000` | Максимум 37 000 |
 | `interAgent.maxResponseChars` | `50000` | Максимум 100 000 |

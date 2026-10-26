@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentConfig } from "../config/schema.js";
@@ -52,6 +53,31 @@ async function readBounded(response: Response, maxBytes: number): Promise<Buffer
     chunks.push(Buffer.from(part.value));
   }
   return Buffer.concat(chunks, bytes);
+}
+
+/** Removes per-event upload directories last modified before the cutoff. */
+export async function pruneSlackUploads(
+  stateDir: string,
+  before: Date,
+): Promise<number> {
+  const root = path.join(stateDir, "uploads");
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.join(root, entry.name);
+    const stat = await fs.lstat(directory);
+    if (stat.mtimeMs >= before.getTime()) continue;
+    await fs.rm(directory, { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
 }
 
 export async function downloadSlackFiles(

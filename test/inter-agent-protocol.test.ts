@@ -136,6 +136,27 @@ describe("inter-agent Slack protocol", () => {
     );
   });
 
+  it("never splits a surrogate pair across response chunks", () => {
+    const request = incomingDelegationRequest(
+      config("worker"),
+      botMention(
+        "worker",
+        `[pi-slack-team:v1:request:${delegationId}]\nDo the work`,
+      ),
+    );
+    const resultText = `${"a".repeat(999)}😀${"b".repeat(10)}`;
+    const messages = delegationResponseMessages(request!, resultText, 1_000);
+    const texts = messages.map(
+      (message) =>
+        incomingDelegationResponse(
+          config("manager"),
+          botMention("manager", message.replace("<@UMANAGER> ", "")),
+        )?.text ?? "",
+    );
+    expect(texts[0]).toBe("a".repeat(999));
+    expect(texts.join("")).toBe(resultText);
+  });
+
   it("marks worker failures explicitly", () => {
     const request = incomingDelegationRequest(
       config("worker"),

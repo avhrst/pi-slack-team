@@ -8,13 +8,15 @@ import { createLogger } from "./observability/logger.js";
 import { PiSessionPool, type PiUiHandler } from "./pi/session-pool.js";
 import { ChatService } from "./routing/chat-service.js";
 import { assertRuntimeIdentity } from "./security/runtime-identity.js";
+import { pruneSlackUploads } from "./slack/file-download.js";
 import { SlackBridge } from "./slack/slack-bridge.js";
 import { Registry } from "./storage/registry.js";
 import { TmuxAgentRunner } from "./tmux/agent-runner.js";
 
+const DAY_MS = 24 * 60 * 60 * 1_000;
 // Slack retries a delivery for minutes, not days; older event IDs only cost disk.
-const PROCESSED_EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
-const PROCESSED_EVENT_PRUNE_INTERVAL_MS = 60 * 60 * 1_000;
+const PROCESSED_EVENT_RETENTION_MS = 7 * DAY_MS;
+const STATE_PRUNE_INTERVAL_MS = 60 * 60 * 1_000;
 const TMUX_HEALTH_INTERVAL_MS = 5_000;
 
 function usage(): never {
@@ -50,7 +52,7 @@ async function start(configPath: string): Promise<void> {
   let healthTimer: NodeJS.Timeout | undefined;
   let pruneTimer: NodeJS.Timeout | undefined;
 
-  const pruneEvents = () => {
+  const pruneState = () => {
     try {
       const removed = registry.pruneEvents(
         new Date(Date.now() - PROCESSED_EVENT_RETENTION_MS),
@@ -61,6 +63,17 @@ async function start(configPath: string): Promise<void> {
     } catch (error) {
       logger.warn("processed_events_prune_failed", { agentId: config.agentId, error });
     }
+    const uploadCutoff = new Date(Date.now() - config.slack.uploadRetentionDays * DAY_MS);
+    void pruneSlackUploads(config.stateDir, uploadCutoff).then(
+      (removed) => {
+        if (removed > 0) {
+          logger.info("slack_uploads_pruned", { agentId: config.agentId, removed });
+        }
+      },
+      (error: unknown) => {
+        logger.warn("slack_uploads_prune_failed", { agentId: config.agentId, error });
+      },
+    );
   };
 
   const shutdown = async (signal: string) => {
@@ -111,8 +124,8 @@ async function start(configPath: string): Promise<void> {
   });
 
   try {
-    pruneEvents();
-    pruneTimer = setInterval(pruneEvents, PROCESSED_EVENT_PRUNE_INTERVAL_MS);
+    pruneState();
+    pruneTimer = setInterval(pruneState, STATE_PRUNE_INTERVAL_MS);
     pruneTimer.unref();
     if (pool instanceof TmuxAgentRunner) await pool.start();
     await interAgent.start();

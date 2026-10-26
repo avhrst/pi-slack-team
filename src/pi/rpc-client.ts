@@ -15,7 +15,12 @@ export interface RpcClientOptions {
   requestTimeoutMs: number;
   extensionPaths?: string[];
   environment?: NodeJS.ProcessEnv;
+  maxLineBytes?: number;
 }
+
+// Pi records carry whole assistant messages and tool output; anything past this
+// is a broken stream, not a record worth buffering.
+export const DEFAULT_MAX_RPC_LINE_BYTES = 64 * 1_024 * 1_024;
 
 export type RpcSpawner = (
   command: string,
@@ -183,6 +188,13 @@ export class RpcClient extends EventEmitter {
       if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
       if (line.length > 0) this.#parseLine(line);
       newline = this.#stdoutBuffer.indexOf(0x0a);
+    }
+    const maxLineBytes = this.#options.maxLineBytes ?? DEFAULT_MAX_RPC_LINE_BYTES;
+    if (this.#stdoutBuffer.length > maxLineBytes) {
+      this.#stdoutBuffer = Buffer.alloc(0);
+      this.emit("protocolError", new Error("Pi RPC JSONL record exceeds the size limit"));
+      // The stream cannot be resynchronised; let the exit path fail pending work.
+      this.#child?.kill("SIGKILL");
     }
   }
 

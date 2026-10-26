@@ -133,8 +133,13 @@ export function delegationResponseMessages(
   }
   const chunks: string[] = [];
   const response = text || "Worker completed without a text response.";
-  for (let offset = 0; offset < response.length; offset += maxChunkChars) {
-    chunks.push(response.slice(offset, offset + maxChunkChars));
+  for (let offset = 0; offset < response.length;) {
+    let end = Math.min(offset + maxChunkChars, response.length);
+    // Keep surrogate pairs together so each Slack message is valid UTF-16.
+    const last = response.charCodeAt(end - 1);
+    if (end < response.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    chunks.push(response.slice(offset, end));
+    offset = end;
   }
   const total = chunks.length;
   return chunks.map((chunk, index) =>

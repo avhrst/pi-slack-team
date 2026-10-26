@@ -4,7 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentConfigSchema } from "../src/config/schema.js";
 import type { IncomingSlackMessage } from "../src/routing/chat-key.js";
-import { downloadSlackFiles } from "../src/slack/file-download.js";
+import {
+  downloadSlackFiles,
+  pruneSlackUploads,
+} from "../src/slack/file-download.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -100,5 +103,28 @@ describe("Slack file downloads", () => {
     await expect(
       downloadSlackFiles(config, message, "xoxb-secret"),
     ).rejects.toThrow("untrusted");
+  });
+
+  it("prunes only upload directories older than the cutoff", async () => {
+    const { config } = setup();
+    const uploads = path.join(config.stateDir, "uploads");
+    const oldDirectory = path.join(uploads, "EvOld");
+    const newDirectory = path.join(uploads, "EvNew");
+    fs.mkdirSync(oldDirectory, { recursive: true });
+    fs.mkdirSync(newDirectory, { recursive: true });
+    fs.writeFileSync(path.join(oldDirectory, "file.txt"), "old");
+    const old = new Date("2026-01-01T00:00:00.000Z");
+    fs.utimesSync(oldDirectory, old, old);
+
+    await expect(
+      pruneSlackUploads(config.stateDir, new Date("2026-02-01T00:00:00.000Z")),
+    ).resolves.toBe(1);
+    expect(fs.existsSync(oldDirectory)).toBe(false);
+    expect(fs.existsSync(newDirectory)).toBe(true);
+  });
+
+  it("treats a missing uploads directory as nothing to prune", async () => {
+    const { config } = setup();
+    await expect(pruneSlackUploads(config.stateDir, new Date())).resolves.toBe(0);
   });
 });

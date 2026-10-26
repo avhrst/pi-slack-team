@@ -65,6 +65,7 @@ export const agentConfigSchema = z
           .max(100 * 1_024 * 1_024)
           .default(20 * 1_024 * 1_024),
         maxFilesPerMessage: z.number().int().min(1).max(10).default(5),
+        uploadRetentionDays: z.number().int().min(1).max(365).default(7),
       })
       .strict(),
     pi: z

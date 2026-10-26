@@ -80,6 +80,10 @@ class FakeRpcProcess extends EventEmitter {
       this.#send({ type: "agent_settled" });
       return;
     }
+    if (record.type === "emit_oversized") {
+      this.stdout.write("x".repeat(64));
+      return;
+    }
     if (record.type === "emit_malformed") {
       this.#send({ type: "response", id, success: true });
       this.stdout.write("not-json\n");
@@ -94,7 +98,9 @@ class FakeRpcProcess extends EventEmitter {
   }
 }
 
-function setup(): { rpc: RpcClient; process: FakeRpcProcess } {
+function setup(
+  options: { maxLineBytes?: number } = {},
+): { rpc: RpcClient; process: FakeRpcProcess } {
   const fakeProcess = new FakeRpcProcess();
   const spawner: RpcSpawner = () =>
     fakeProcess as unknown as ChildProcessWithoutNullStreams;
@@ -108,6 +114,7 @@ function setup(): { rpc: RpcClient; process: FakeRpcProcess } {
         sessionDir: "/tmp/fake-sessions",
         sessionName: "test",
         requestTimeoutMs: 2_000,
+        ...options,
       },
       spawner,
     ),
@@ -186,5 +193,24 @@ describe("RpcClient", () => {
       message: "Invalid Pi RPC JSONL record",
     });
     await rpc.stop();
+  });
+
+  it("kills Pi when a record exceeds the line size limit", async () => {
+    const { rpc } = setup({ maxLineBytes: 32 });
+    const protocolError = new Promise<Error>((resolve) =>
+      rpc.once("protocolError", resolve),
+    );
+    const unexpectedExit = new Promise<unknown>((resolve) =>
+      rpc.once("unexpectedExit", resolve),
+    );
+    await rpc.start();
+    await expect(rpc.request({ type: "emit_oversized" })).rejects.toThrow(
+      "Pi RPC process exited",
+    );
+    await expect(protocolError).resolves.toMatchObject({
+      message: "Pi RPC JSONL record exceeds the size limit",
+    });
+    await expect(unexpectedExit).resolves.toMatchObject({ signal: "SIGKILL" });
+    expect(rpc.running).toBe(false);
   });
 });
