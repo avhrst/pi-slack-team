@@ -11,7 +11,6 @@ export const SLACK_PROGRESS_UPDATE_TIMEOUT_MS = 20_000;
 const TIMEOUT_ERROR_NAME = "SlackProgressUpdateTimeoutError";
 const FINAL_UPDATE_ATTEMPTS = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
-export const FINAL_RETRY_DELAY_CAP_MS = 5_000;
 
 /**
  * Rate limits, timeouts and network/5xx failures say nothing about the payload,
@@ -43,8 +42,17 @@ function transientFailure(error: unknown): { retryAfterMs: number } | undefined 
   };
 }
 
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 export type ProgressUpdateAttempt = "configured" | "summary-fallback";
@@ -67,7 +75,7 @@ export class SlackProgressReporter {
     attempt: ProgressUpdateAttempt,
   ) => void;
   readonly #updateTimeoutMs: number;
-  readonly #finalRetryDelayCapMs: number;
+  readonly #retryAbort = new AbortController();
   #timer: NodeJS.Timeout | undefined;
   #lastUpdateAt = 0;
   #notBefore = 0;
@@ -85,7 +93,6 @@ export class SlackProgressReporter {
       attempt: ProgressUpdateAttempt,
     ) => void,
     updateTimeoutMs = SLACK_PROGRESS_UPDATE_TIMEOUT_MS,
-    finalRetryDelayCapMs = FINAL_RETRY_DELAY_CAP_MS,
   ) {
     this.#configuredTranscript = new PiProgressTranscript(mode);
     this.#summaryTranscript = mode === "raw"
@@ -94,7 +101,6 @@ export class SlackProgressReporter {
     this.#update = update;
     this.#onError = onError;
     this.#updateTimeoutMs = updateTimeoutMs;
-    this.#finalRetryDelayCapMs = finalRetryDelayCapMs;
   }
 
   record(event: RpcRecord): void {
@@ -111,6 +117,7 @@ export class SlackProgressReporter {
 
   /** Settles the placeholder as a receipt, noting a failed answer delivery. */
   async complete(failure?: DeliveryFailure): Promise<void> {
+    if (this.#discardPending) return;
     this.#accepting = false;
     this.#clearTimer();
     this.#queuedUpdate = failure
@@ -124,6 +131,7 @@ export class SlackProgressReporter {
     this.#discardPending = true;
     this.#queuedUpdate = undefined;
     this.#clearTimer();
+    this.#retryAbort.abort();
     await this.#drainPromise;
   }
 
@@ -211,6 +219,11 @@ export class SlackProgressReporter {
     // worth waiting for, or the message stays "working" forever.
     const maxAttempts = state === "working" ? 1 : FINAL_UPDATE_ATTEMPTS;
     for (let attempt = 1; ; attempt += 1) {
+      // complete() bypasses the working-update scheduler, so every attempt
+      // must respect the cooldown left by either a working or final update.
+      const delay = this.#notBefore - Date.now();
+      if (delay > 0) await sleep(delay, this.#retryAbort.signal);
+      if (this.#discardPending) return;
       const transcript = this.#usingSummaryFallback
         ? this.#summaryTranscript ?? this.#configuredTranscript
         : this.#configuredTranscript;
@@ -226,7 +239,6 @@ export class SlackProgressReporter {
         if (transient) {
           this.#notBefore = Date.now() + transient.retryAfterMs;
           if (attempt >= maxAttempts) return;
-          await sleep(Math.min(transient.retryAfterMs, this.#finalRetryDelayCapMs));
           continue;
         }
         // Slack rejected this payload; the compact summary is the only retry.

@@ -46,6 +46,22 @@ describe("chunkSlackText", () => {
     expect(chunks.at(-1)?.endsWith("Done")).toBe(true);
   });
 
+  it.each(["\n", "\n\n", "\n\n\n\n", "\r\n\r\n"])(
+    "preserves code contents at a %j boundary",
+    (boundary) => {
+      const code = `const value = \`${"x".repeat(21_000)}${boundary}${"y".repeat(21_000)}\`;`;
+      const chunks = chunkSlackText(`\`\`\`\n${code}\n\`\`\``);
+
+      expect(chunks).toHaveLength(2);
+      const restored = chunks.map((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(38_000);
+        expect(chunk).toMatch(/^```\n[\s\S]*\n```$/u);
+        return chunk.slice(4, -4);
+      }).join("");
+      expect(restored).toBe(code);
+    },
+  );
+
   it("never exceeds the limit", () => {
     const text = Array.from({ length: 500 }, (_, index) => `line ${index}`).join("\n");
     for (const chunk of chunkSlackText(text, 100)) {

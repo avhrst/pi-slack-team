@@ -215,6 +215,8 @@ describe("SlackProgressReporter", () => {
 
       const completing = reporter.complete();
       await vi.advanceTimersByTimeAsync(100);
+      expect(update).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
       await completing;
 
       expect(update).toHaveBeenCalledTimes(2);
@@ -293,11 +295,94 @@ describe("SlackProgressReporter", () => {
 
     expect(update).toHaveBeenCalledTimes(3);
   });
+
+  it.each([undefined, { posted: 1, total: 3, correlationId: "ref-1" }])(
+    "waits for each full Retry-After before retrying the final receipt (%j)",
+    async (failure) => {
+      vi.useFakeTimers();
+      try {
+        const startedAt = Date.now();
+        const attemptTimes: number[] = [];
+        const update = vi.fn(async () => {
+          attemptTimes.push(Date.now() - startedAt);
+          if (attemptTimes.length === 1) throw rateLimited(30);
+          if (attemptTimes.length === 2) throw rateLimited(15);
+        });
+        const reporter = new SlackProgressReporter("summary", update, () => undefined);
+        const completing = reporter.complete(failure);
+
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(update).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(update).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(update).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1);
+        await completing;
+
+        expect(attemptTimes).toEqual([0, 30_000, 45_000]);
+        expect(update).toHaveBeenLastCalledWith(
+          expect.stringContaining(failure
+            ? ":warning: Pi completed, but Slack rejected part 2 of 3"
+            : ":white_check_mark: *Pi completed*"),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps a working update's Retry-After when the turn completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const update = vi.fn(async () => {
+        if (update.mock.calls.length === 1) throw rateLimited(30);
+      });
+      const reporter = new SlackProgressReporter("summary", update, () => undefined);
+      reporter.record(event("agent_start"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const completing = reporter.complete();
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(update).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await completing;
+
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(update).toHaveBeenLastCalledWith(
+        expect.stringContaining(":white_check_mark: *Pi completed*"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the Retry-After wait when closed", async () => {
+    vi.useFakeTimers();
+    try {
+      const update = vi.fn(async () => {
+        throw rateLimited(30);
+      });
+      const reporter = new SlackProgressReporter("summary", update, () => undefined);
+      const completing = reporter.complete();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+
+      await Promise.all([reporter.close(), completing]);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(update).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
-function rateLimited(): Error {
+function rateLimited(retryAfter = 0): Error {
   return Object.assign(new Error("A rate limit was exceeded"), {
     code: "slack_webapi_rate_limited_error",
-    retryAfter: 0,
+    retryAfter,
   });
 }

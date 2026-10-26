@@ -48,8 +48,9 @@ export function chunkSlackText(text: string, limit = SLACK_CHUNK_LIMIT): string[
     }
     result.push(open ? `${rest.slice(0, cut)}${FENCE_CLOSE}` : rest.slice(0, cut));
     rest = rest.slice(cut);
-    // Drop the newline boundary itself; Slack separates messages visually.
-    if (boundary) rest = rest.replace(/^\n+/, "");
+    // Message spacing replaces prose boundaries, but newlines inside code are
+    // content and must survive the synthetic closing/reopening fences.
+    if (boundary && !open) rest = rest.replace(/^\n+/, "");
     if (open) rest = `${FENCE_OPEN}${rest}`;
   }
   if (rest.length > 0) result.push(rest);

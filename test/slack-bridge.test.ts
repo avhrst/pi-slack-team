@@ -157,6 +157,33 @@ describe("SlackBridge response delivery", () => {
     expect(slack.update).not.toHaveBeenCalled();
   });
 
+  it("delivers the answer before waiting for a rate-limited receipt", async () => {
+    vi.useFakeTimers();
+    try {
+      slack.postMessage.mockResolvedValue({ ts: "working-ts" });
+      slack.progressUpdate.mockRejectedValueOnce(Object.assign(new Error("rate limited"), {
+        code: "slack_webapi_rate_limited_error",
+        retryAfter: 30,
+      }));
+      bridge(async () => "All green.");
+
+      const handling = directMessage();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(slack.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ text: "All green." }),
+      );
+      expect(slack.progressUpdate).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(slack.progressUpdate).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await handling;
+      expect(slack.progressUpdate).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still delivers the answer when the placeholder post fails", async () => {
     slack.postMessage
       .mockRejectedValueOnce(new Error("ratelimited"))
