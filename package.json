@@ -1,6 +1,6 @@
 {
   "name": "@avhrst/pi-slack-team",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Run one Slack app per Linux-isolated Pi agent with one persistent Pi session per Slack chat.",
   "type": "module",
