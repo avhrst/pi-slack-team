@@ -37,16 +37,14 @@ describe("Slack app manifest", () => {
         "assistant:write",
         "channels:history",
         "chat:write",
-        ...(file === "deploy-agent.yaml" ? ["files:read"] : []),
+        "files:read",
         "groups:history",
         "im:history",
       ]);
       expect(manifest.settings.event_subscriptions.bot_events).toEqual([
         "app_home_opened",
         "app_mention",
-        ...(expectedAgent?.manager
-          ? ["message.channels", "message.groups"]
-          : []),
+        "message.channels", "message.groups",
         "message.im",
       ]);
       expect(manifest.settings.socket_mode_enabled).toBe(true);
@@ -61,6 +59,8 @@ describe("Slack app manifest", () => {
           "app_home_opened",
           "app_mention",
           "assistant_thread_started",
+          "message.channels",
+          "message.groups",
           "message.im",
         ],
       ],
@@ -144,12 +144,15 @@ describe("Slack app manifest", () => {
       "assistant:write",
       "channels:history",
       "chat:write",
+      "files:read",
       "groups:history",
       "im:history",
     ]);
     expect(manifest.settings.event_subscriptions.bot_events).toEqual([
       "app_home_opened",
       "app_mention",
+      "message.channels",
+      "message.groups",
       "message.im",
     ]);
     expect(manifest.settings.interactivity.is_enabled).toBe(false);

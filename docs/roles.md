@@ -16,7 +16,8 @@ role: worker # or manager
 | --- | --- | --- |
 | Authorized direct messages | Processed | Processed |
 | Explicit `@agent` mention in a public/private channel | Processed | Processed |
-| Ordinary authorized human message in a joined channel | Ignored | Evaluated |
+| Authorized reply in an engaged thread, without another mention | Processed | Processed |
+| Ordinary authorized human message outside an engaged thread | Ignored | Evaluated silently |
 | Ordinary bot-authored message | Ignored | Ignored |
 | Correlated envelope from an exact configured opposite-role peer | Manager request only | Worker response only |
 | Message from a user outside `allowedUserIds` | Ignored | Ignored |
@@ -28,14 +29,15 @@ Both roles require an exact workspace ID, app ID, and non-empty user allowlist. 
 
 ## Worker role
 
-Use a worker for an on-demand specialist that should act only when addressed.
+Use a worker for an on-demand specialist invited into a thread by its first authorized mention.
 
 A worker accepts:
 
 1. `message.im` events from an allowed user;
-2. `app_mention` events from an allowed user in a public or private channel.
+2. `app_mention` events from an allowed user in a public or private channel;
+3. `message.channels` and `message.groups` replies from allowed users in an engaged thread.
 
-An ordinary channel message cannot allocate or resume its Pi session. Follow-up channel turns must mention the worker again. This is the least-privileged role and is appropriate for deployment, infrastructure, database, and other agents with sensitive tools.
+The first authorized mention or trusted delegation persists engagement for the exact workspace, app, channel and thread. Other allowed participants may continue without another mention. Existing worker conversations are backfilled as engaged; ordinary messages in inactive threads remain ignored.
 
 Use [the worker Slack manifest](../manifests/worker-agent.example.yaml) as the public template.
 
@@ -48,7 +50,7 @@ A manager has all worker behavior and additionally accepts:
 - `message.channels` for public channels the app has joined;
 - `message.groups` for private channels the app has joined.
 
-Ambient messages are processed only when all runtime checks pass:
+Replies in engaged threads are ordinary dialog continuations. Outside those threads, ambient messages are processed only when all runtime checks pass:
 
 - workspace and app IDs match the configuration;
 - the sender is listed in `slack.allowedUserIds`;
@@ -115,14 +117,14 @@ The durable conversation key is:
 
 A root message uses its own timestamp as `thread_ts`. Direct messages from the same human to the same agent share one logical Pi session across roots; channel threads retain separate sessions. The first accepted human normally becomes the durable conversation owner. A configured manager bot is a provisional owner when its delegation creates a worker conversation.
 
-- The first allowed human who explicitly mentions that worker after the delegated turn is idle may atomically claim the provisional bot-owned conversation. This preserves the Pi session while binding future confirmations to a human.
-- Workers allow other authorized humans to continue the channel-thread session through explicit mentions, but preserve its durable owner. Configured manager delegations may also continue that session.
+- The first allowed human who mentions or replies to that worker after the delegated turn is idle may atomically claim the provisional bot-owned conversation. This preserves the Pi session while binding future confirmations to a human.
+- Workers allow other authorized humans to continue the engaged channel-thread session without another mention, but preserve its durable owner. Configured manager delegations may also continue that session.
 - Managers allow other authorized humans to contribute channel turns to the same Pi session, including ambient messages.
-- Interactive Pi confirmations remain bound to the durable human owner to prevent cross-user approval.
+- Interactive Pi confirmations are bound to the human who submitted the corresponding request. Their replies are consumed before queued turns, without requiring another mention.
 - Human thread replies broadcast to the channel (`thread_broadcast`) are accepted under the same mention/authorization checks.
-- Slack message edits are not executable events. Send a new DM or explicit mention instead of editing an existing message to invoke an agent.
+- Slack message edits are not executable events. Send a new DM, mention or reply in an engaged thread.
 
-New sessions receive bounded prior thread context. Existing sessions resume from their Pi JSONL file and do not receive the full transcript again.
+Every turn receives new thread context after its durable timestamp cursor, excluding the current request and this agent's output. Context remains explicitly untrusted and bounded to 200 messages / 50,000 characters. Existing sessions resume from their Pi JSONL file; context preparation, execution and final delivery run in acceptance order. Old manager conversations without a trusted engagement marker require a new mention.
 
 ## Attachments
 

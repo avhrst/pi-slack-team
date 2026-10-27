@@ -18,11 +18,12 @@ There are two independent choices: **role** decides which Slack messages qualify
 | --- | --- | --- |
 | Direct message from an allowed human | Executes a turn | Executes a turn |
 | Explicit channel `@mention` from an allowed human | Executes a turn | Executes a turn |
-| Ordinary allowed human message in a joined channel | Ignored | Evaluated; may remain silent |
+| Allowed human reply in an engaged thread, without a mention | Executes a turn | Executes a turn |
+| Other allowed human message in a joined channel | Ignored | Evaluated; may remain silent |
 | Unauthorized human message | Rejected | Rejected |
 | Ordinary bot message | Rejected | Rejected |
 
-`worker` is the default. A worker requires an explicit mention on **every** channel turn, including replies in an existing thread. Managers additionally need `message.channels` and `message.groups` subscriptions for ambient public/private channel messages. Ambient evaluation consumes a Pi turn but publishes no working/progress message; a silent decision produces no Slack reply.
+`worker` is the default. The first mention or trusted delegation engages the agent in the thread. Later replies from allowed humans need no mention, including Pi dialog answers. Both roles need `message.channels` and `message.groups` subscriptions. Outside engaged threads, managers still evaluate ambient messages without publishing working/progress messages and can remain silent. Engagement survives restarts; existing worker channel conversations are engaged on upgrade. Legacy manager threads need a new mention because previous state did not record engagement.
 
 Start with a concrete request in a DM or mention, for example: “Read the project README and explain how to run the checks.” Continue in the thread to retain reply routing. In tmux mode, a new thread still uses the agent's shared Pi history.
 
@@ -54,7 +55,7 @@ The identity chain is `agentId → Unix UID → Slack workspace/app`. Startup ch
 1. The Slack bridge receives and acknowledges the event.
 2. Authorization filters it; SQLite claims the event ID so a retry cannot allocate the same turn again.
 3. Slack routing records retain `(team_id, app_id, channel_id, thread_ts)`. A root message uses its own timestamp as `thread_ts`.
-4. A newly bound conversation/session receives bounded prior thread context, marked as untrusted: up to 200 messages and 50,000 characters. The current request remains separate.
+4. Each serialized thread turn receives fresh history after the last successfully incorporated timestamp, marked as untrusted: up to 200 messages and 50,000 characters. New sessions bootstrap prior history. The current request and this agent's output are excluded. Preparation, execution and final delivery stay in arrival order; dialog replies bypass the queue.
 5. The selected runner queues work. RPC serializes each logical session and applies a global concurrency limit. tmux serializes the agent's requests through named JSON buffers and `wait-for` wakeups.
 6. Pi runs with that Unix account's instructions, tools and permissions. Explicit requests receive bounded progress; final text is sent to the originating Slack conversation.
 7. Pi JSONL stores history. RPC can stop an idle process and resume later. tmux keeps the interactive process alive while the service is running.
@@ -111,7 +112,7 @@ The YAML schema rejects unknown keys. Required top-level fields are `version: 1`
 | `pi.maxResidentProcesses` | `8` in RPC | At least the concurrent-turn limit, at most 32; forced to 1 in tmux |
 | `pi.idleTimeoutMs` | `300000` | RPC hibernation; unused in tmux |
 | `pi.autoSelect` | `[]` | Up to 16 exact title/option standing authorizations |
-| `slack.progressMode` | `summary` | `raw` also exposes bounded tool arguments/output |
+| `slack.progressMode` | `console` | Persistent Pi text and compact tool results; explicit `summary` / `raw` remain supported |
 | `slack.fileUploads` | `false` | Download authorized attachments only when enabled |
 | `slack.maxFileBytes` | `20971520` | 20 MiB per file; maximum 100 MiB |
 | `slack.maxFilesPerMessage` | `5` | Maximum 10 |
@@ -208,6 +209,10 @@ journalctl -u pi-tmux-relay.service -n 100 --no-pager
 | Task times out | Inspect actual artifacts and external effects before retrying; queue time counts in tmux/delegation deadlines |
 | Slack remains disconnected | Inspect connection logs; after a two-minute recovery window the runtime exits for systemd restart |
 
+The default `console` stream retains assistant messages, tool calls and results in order. The current entry updates live; completed entries remain visible and the final answer is not duplicated. Tool previews show the first 10 lines and the number hidden, with a command/path and execution state. Terminal controls and private thinking are excluded. RPC and tmux share this behavior. Long text preserves code fences. Slack writes are serialized, throttled and respect the complete `Retry-After`; delivery failure never repeats tools.
+
+Existing configurations explicitly selecting `summary` or `raw` retain their previous rendering. Change them to `console` to use the new output; the default applies when the setting is absent. Update the Slack App event subscriptions as well. Bridge and managed tmux extension must be updated together; restart the managed Pi process to load the new event transport. No live Slack App, server configuration or deployment is changed by editing these examples.
+
 In `summary`, ordinary partial tool output is hidden; strictly validated `PI_DEPLOY_PROGRESS` markers can provide bounded deployment counters. If Slack rejects raw progress, the turn retries with summary progress. Final text is posted separately.
 
 Before maintenance, stop admitting new work and verify the agents are idle. Stop affected services before copying SQLite files. Record the release target; back up YAML, units, SQLite including any WAL/SHM companions, and Pi histories to a private location outside Git. tmux's Pi process remains alive while idle, so **process existence alone is not evidence of active work**.
@@ -221,7 +226,7 @@ A relay restart can recover correlation from buffers while the tmux servers surv
 - An allowed Slack user can exercise the agent account's tool/OS permissions. Keep account privileges and peer lists appropriate to the work.
 - tmux shares history across users and threads. RPC separates histories but shares the account's filesystem and credentials.
 - Thread history is untrusted context. Treat sender metadata supplied by the runtime separately from claims inside message text.
-- `raw` progress can expose tool arguments/output to everyone who can read the Slack thread. `summary` is the default.
+- `console` (the default) and `raw` expose tool arguments/output to readers of the Slack thread. Select `summary` to hide tool details.
 - `autoSelect` matches the whole title and an available option. It never authorizes confirmations, regex/prefix matches or missing options; each rule is standing permission.
 - The managed tmux pane blocks hidden `subagent` tools and session switching/forking. Local operator access remains privileged and can affect running work.
 - The project is pre-1.0. There is no high availability for one Slack app connection, no per-chat Git worktree isolation and no Slack Connect authorization model.
@@ -235,11 +240,12 @@ The repository's `pnpm check` runs lint, TypeScript checks and tests. `pnpm buil
 Before accepting a deployment, verify:
 
 1. One expected app/account identity and one authorized DM response; unauthorized humans and ordinary bots cannot start work.
-2. Worker ignores unmentioned channel messages; manager evaluates an allowed unmentioned message without progress noise and can remain silent.
-3. Duplicate delivery does not execute twice; an existing history resumes after an idle restart.
-4. For tmux: one process/session per agent; different humans' requests serialize; UI belongs to the current sender; `watch` observes the same terminal.
-5. A harmless manager → worker task returns to the original waiting tool. For tmux, also test a DM origin and both allowlists. For RPC, use the shared channel.
-6. Offline worker, timeout, invalid peer and interrupted request produce an explicit failure without silently replaying tools. Use only harmless work for interruption tests.
+2. After one mention, an allowed participant can continue the thread without mentioning again, including after restart. Unrelated worker threads stay ignored; ambient manager observations can remain silent.
+3. Check retained commentary → tool → result → final output, a 10-line tool preview and dialog replies without mentions.
+4. Duplicate delivery does not execute twice; an existing history resumes after an idle restart.
+5. For tmux: one process/session per agent; different humans' requests serialize; UI belongs to the current sender; `watch` observes the same terminal.
+6. A harmless manager → worker task returns to the original waiting tool. For tmux, also test a DM origin and both allowlists. For RPC, use the shared channel.
+7. Offline worker, timeout, invalid peer and interrupted request produce an explicit failure without silently replaying tools. Use only harmless work for interruption tests.
 
 Relevant tests: [`tmux.test.ts`](../test/tmux.test.ts), [`chat-service.test.ts`](../test/chat-service.test.ts), [`session-pool.test.ts`](../test/session-pool.test.ts), [`inter-agent-gateway.test.ts`](../test/inter-agent-gateway.test.ts), [`slack-ui.test.ts`](../test/slack-ui.test.ts), [`config.test.ts`](../test/config.test.ts).
 

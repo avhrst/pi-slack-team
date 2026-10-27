@@ -12,6 +12,7 @@ import {
 import type { Registry } from "../storage/registry.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
 import { piSessionKey, serializePiSessionKey } from "./session-key.js";
+import { KeyedSerialQueue } from "./queue.js";
 
 export type MessageDisposition =
   | { type: "ignored"; reason: string }
@@ -19,9 +20,12 @@ export type MessageDisposition =
   | { type: "completed"; result: PiTurnResult };
 
 export interface MessageHooks {
-  onAccepted?: () => Promise<void>;
-  preparePrompt?: (context: { isNewConversation: boolean }) => Promise<string>;
+  onAccepted?: (context: { isObservation: boolean }) => Promise<void>;
+  preparePrompt?: (context: { isNewConversation: boolean; afterTs?: string }) => Promise<
+    string | { text: string; contextThroughTs?: string }
+  >;
   onPiEvent?: (event: RpcRecord) => void;
+  onCompleted?: (result: PiTurnResult) => Promise<void>;
 }
 
 export interface PiPromptRunner {
@@ -42,6 +46,7 @@ export class ChatService {
   readonly #logger: Logger;
   readonly #allowedUsers: Set<string>;
   readonly #managerBotUsers: Set<string>;
+  readonly #queue = new KeyedSerialQueue();
 
   constructor(
     config: AgentConfig,
@@ -53,6 +58,7 @@ export class ChatService {
     this.#registry = registry;
     this.#pool = pool;
     this.#logger = logger;
+    if (config.role === "worker") registry.backfillWorkerThreads();
     this.#allowedUsers = new Set(config.slack.allowedUserIds);
     this.#managerBotUsers = new Set(
       config.interAgent?.peers
@@ -83,85 +89,99 @@ export class ChatService {
     }
 
     const key = conversationKey(message);
-    let existing = this.#registry.getConversation(key);
-    const humanClaimingManagerOwnedThread = Boolean(
-      existing &&
-      this.#config.role === "worker" &&
-      message.kind === "app-mention" &&
-      !message.botId &&
-      existing.ownerUserId !== message.userId &&
-      this.#managerBotUsers.has(existing.ownerUserId),
-    );
-    if (existing && humanClaimingManagerOwnedThread) {
-      const previousOwnerUserId = existing.ownerUserId;
-      const claimed = this.#registry.transferConversationOwner(
-        key,
-        previousOwnerUserId,
-        message.userId,
+    if (message.kind === "app-mention") this.#registry.engageThread(key);
+    const isObservation = this.#config.role === "manager" &&
+      message.kind === "channel-message" && !this.#registry.threadState(key).engaged;
+    // Claim and engage synchronously, before a second Slack event can arrive.
+    // The lane includes prompt preparation and output finalization, not just Pi.
+    const lane = this.#config.pi.transport === "tmux"
+      ? `agent:${key.teamId}:${key.appId}`
+      : serializePiSessionKey(piSessionKey(key, message.userId));
+    return this.#queue.run(lane, async () => {
+      let existing = this.#registry.getConversation(key);
+      const humanClaimingManagerOwnedThread = Boolean(
+        existing &&
+        this.#config.role === "worker" &&
+        ["app-mention", "channel-message"].includes(message.kind) &&
+        !message.botId &&
+        existing.ownerUserId !== message.userId &&
+        this.#managerBotUsers.has(existing.ownerUserId),
       );
-      if (claimed) {
-        existing = claimed;
-        this.#logger.info("slack_delegated_conversation_claimed", {
+      if (existing && humanClaimingManagerOwnedThread) {
+        const previousOwnerUserId = existing.ownerUserId;
+        const claimed = this.#registry.transferConversationOwner(
+          key,
+          previousOwnerUserId,
+          message.userId,
+        );
+        if (claimed) {
+          existing = claimed;
+          this.#logger.info("slack_delegated_conversation_claimed", {
+            agentId: this.#config.agentId,
+            eventId: message.eventId,
+            previousOwnerUserId,
+            userId: message.userId,
+          });
+        }
+      }
+      const sharedManagerChannel =
+        this.#config.role === "manager" &&
+        ["channel-message", "app-mention"].includes(message.kind);
+      const sharedWorkerThread =
+        this.#config.role === "worker" &&
+        ["app-mention", "channel-message"].includes(message.kind);
+      const sharedConversation =
+        sharedManagerChannel || sharedWorkerThread || Boolean(delegation);
+      if (
+        existing &&
+        existing.ownerUserId !== message.userId &&
+        !sharedConversation
+      ) {
+        this.#logger.warn("slack_conversation_owner_mismatch", {
           agentId: this.#config.agentId,
           eventId: message.eventId,
-          previousOwnerUserId,
           userId: message.userId,
         });
+        return { type: "ignored", reason: "conversation-owner-mismatch" };
       }
-    }
-    const sharedManagerChannel =
-      this.#config.role === "manager" &&
-      ["channel-message", "app-mention"].includes(message.kind);
-    const sharedWorkerThread =
-      this.#config.role === "worker" && message.kind === "app-mention";
-    const sharedConversation =
-      sharedManagerChannel || sharedWorkerThread || Boolean(delegation);
-    if (
-      existing &&
-      existing.ownerUserId !== message.userId &&
-      !sharedConversation
-    ) {
-      this.#logger.warn("slack_conversation_owner_mismatch", {
-        agentId: this.#config.agentId,
-        eventId: message.eventId,
-        userId: message.userId,
-      });
-      return { type: "ignored", reason: "conversation-owner-mismatch" };
-    }
 
-    await hooks.onAccepted?.();
-    const ownerUserId = existing?.ownerUserId ?? message.userId;
-    const sessionKey =
-      existing?.sessionKey ?? serializePiSessionKey(piSessionKey(key, ownerUserId));
-    const persistedSession = this.#registry.getPiSession(sessionKey);
-    const promptText = hooks.preparePrompt
-      ? await hooks.preparePrompt({
-          isNewConversation: this.#config.pi.transport === "tmux"
-            ? !existing || !existing.sessionKey.startsWith("agent:")
-            : !persistedSession?.piSessionFile,
-        })
-      : message.text;
-    if (this.#config.pi.transport === "tmux") {
-      const result = await this.#pool.prompt(
-        key, ownerUserId, promptText, hooks.onPiEvent, sharedConversation, message.userId,
-      );
+      await hooks.onAccepted?.({ isObservation });
+      const ownerUserId = existing?.ownerUserId ?? message.userId;
+      const sessionKey =
+        existing?.sessionKey ?? serializePiSessionKey(piSessionKey(key, ownerUserId));
+      const persistedSession = this.#registry.getPiSession(sessionKey);
+      const isNewConversation = this.#config.pi.transport === "tmux"
+        ? !existing || !existing.sessionKey.startsWith("agent:")
+        : !persistedSession?.piSessionFile;
+      const afterTs = isNewConversation ? undefined : this.#registry.threadState(key).contextTs;
+      const prepared = hooks.preparePrompt
+        ? await hooks.preparePrompt({
+            isNewConversation,
+            ...(afterTs ? { afterTs } : {}),
+          })
+        : message.text;
+      const promptText = typeof prepared === "string" ? prepared : prepared.text;
+      const result = sharedConversation || this.#config.pi.transport === "tmux"
+        ? await this.#pool.prompt(
+            key,
+            ownerUserId,
+            promptText,
+            hooks.onPiEvent,
+            sharedConversation,
+            message.userId,
+          )
+        : await this.#pool.prompt(
+            key,
+            ownerUserId,
+            promptText,
+            hooks.onPiEvent,
+          );
+      if (typeof prepared !== "string" && prepared.contextThroughTs) {
+        this.#registry.advanceThreadContext(key, prepared.contextThroughTs);
+      }
+      await hooks.onCompleted?.(result);
       return { type: "completed", result };
-    }
-    const result = sharedConversation
-      ? await this.#pool.prompt(
-          key,
-          ownerUserId,
-          promptText,
-          hooks.onPiEvent,
-          true,
-        )
-      : await this.#pool.prompt(
-          key,
-          ownerUserId,
-          promptText,
-          hooks.onPiEvent,
-        );
-    return { type: "completed", result };
+    });
   }
 
   claimEvent(eventId: string): boolean {
@@ -192,10 +212,18 @@ export class ChatService {
       message.kind === "channel-message" &&
       ["channel", "group"].includes(message.channelType) &&
       ["C", "G"].some((prefix) => message.channelId.startsWith(prefix));
+    const validThreadReply = message.kind === "channel-message" &&
+      Boolean(message.threadTs) &&
+      ["channel", "group"].includes(message.channelType) &&
+      ["C", "G"].some((prefix) => message.channelId.startsWith(prefix)) &&
+      this.#registry.threadState(conversationKey(message)).engaged;
+    const metadataOnlyObservation = validManagerObservation &&
+      !this.#registry.threadState(conversationKey(message)).engaged;
     if (
       !validDirectMessage &&
       !validChannelMention &&
-      !validManagerObservation
+      !validManagerObservation &&
+      !validThreadReply
     ) {
       return "unsupported-conversation";
     }
@@ -212,14 +240,14 @@ export class ChatService {
     if (
       message.files.length > 0 &&
       !this.#config.slack.fileUploads &&
-      !validManagerObservation
+      !metadataOnlyObservation
     ) {
       return "file-uploads-disabled";
     }
     const validHumanThreadBroadcast =
       message.subtype === "thread_broadcast" &&
       !message.botId &&
-      (validChannelMention || validManagerObservation);
+      (validChannelMention || validManagerObservation || validThreadReply);
     if (
       message.subtype &&
       !(

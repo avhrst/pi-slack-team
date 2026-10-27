@@ -10,8 +10,8 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  # summary hides tool arguments/output; raw exposes them in Slack.
-  progressMode: summary
+  # console preserves Pi text and compact tool previews; summary hides tool details.
+  progressMode: console
   fileUploads: false
   maxFileBytes: 20971520
   maxFilesPerMessage: 5

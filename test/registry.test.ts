@@ -27,6 +27,23 @@ afterEach(() => {
 });
 
 describe("Registry", () => {
+  it("persists engagement and a monotonic context cursor independently of a Pi conversation", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pst-thread-state-"));
+    temporaryDirectories.push(directory);
+    const file = path.join(directory, "state.sqlite");
+    const thread = { ...key, channelId: "C01" };
+    const first = new Registry(file);
+    first.engageThread(thread);
+    first.advanceThreadContext(thread, "125.000");
+    first.advanceThreadContext(thread, "124.000");
+    expect(first.getConversation(thread)).toBeUndefined();
+    first.close();
+    const reopened = new Registry(file);
+    expect(reopened.threadState(thread)).toEqual({ engaged: true, contextTs: "125.000" });
+    expect(reopened.threadState({ ...thread, appId: "A02" })).toEqual({ engaged: false });
+    reopened.close();
+  });
+
   it("claims each Slack event only once", () => {
     const registry = createRegistry();
     expect(registry.claimEvent("Ev01")).toBe(true);

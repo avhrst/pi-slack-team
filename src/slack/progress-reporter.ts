@@ -16,7 +16,7 @@ const DEFAULT_RETRY_DELAY_MS = 1_000;
  * Rate limits, timeouts and network/5xx failures say nothing about the payload,
  * so they must neither trigger the summary fallback nor drop the final state.
  */
-function transientFailure(error: unknown): { retryAfterMs: number } | undefined {
+export function transientFailure(error: unknown): { retryAfterMs: number } | undefined {
   if (!error || typeof error !== "object") return undefined;
   const record = error as {
     code?: unknown;
@@ -42,7 +42,7 @@ function transientFailure(error: unknown): { retryAfterMs: number } | undefined 
   };
 }
 
-function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+export function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
     const finish = () => {
@@ -55,27 +55,32 @@ function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-export type ProgressUpdateAttempt = "configured" | "summary-fallback";
+export type ProgressUpdateAttempt = "configured" | "summary-fallback" | "balanced-fallback";
 
 interface QueuedProgressUpdate {
   state: ProgressState;
   failure?: DeliveryFailure;
+  reference?: string;
 }
 
 /**
- * Serializes Slack progress updates and permanently degrades a raw transcript
- * to the compact summary transcript when Slack rejects a detailed payload.
+ * Serializes Slack progress updates and degrades rejected payloads safely.
+ * Informative falls back to balanced (never raw text deltas); legacy modes
+ * keep their summary fallback. Identical views are never reposted.
  */
 export class SlackProgressReporter {
   readonly #configuredTranscript: PiProgressTranscript;
-  readonly #summaryTranscript: PiProgressTranscript | undefined;
+  readonly #fallbackTranscript: PiProgressTranscript | undefined;
+  readonly #fallbackAttempt: ProgressUpdateAttempt;
   readonly #update: (text: string) => Promise<void>;
   readonly #onError: (
     error: unknown,
     attempt: ProgressUpdateAttempt,
   ) => void;
   readonly #updateTimeoutMs: number;
+  readonly #intervalMs: number;
   readonly #retryAbort = new AbortController();
+  #lastRenderedText: string | undefined;
   #timer: NodeJS.Timeout | undefined;
   #lastUpdateAt = 0;
   #notBefore = 0;
@@ -83,7 +88,7 @@ export class SlackProgressReporter {
   #drainPromise: Promise<void> | undefined;
   #accepting = true;
   #discardPending = false;
-  #usingSummaryFallback = false;
+  #usingFallback = false;
 
   constructor(
     mode: ProgressMode,
@@ -95,20 +100,22 @@ export class SlackProgressReporter {
     updateTimeoutMs = SLACK_PROGRESS_UPDATE_TIMEOUT_MS,
   ) {
     this.#configuredTranscript = new PiProgressTranscript(mode);
-    this.#summaryTranscript = mode === "raw"
-      ? new PiProgressTranscript("summary")
+    this.#fallbackTranscript = mode !== "summary"
+      ? new PiProgressTranscript(mode === "informative" ? "balanced" : "summary")
       : undefined;
+    this.#fallbackAttempt = mode === "informative" ? "balanced-fallback" : "summary-fallback";
     this.#update = update;
     this.#onError = onError;
     this.#updateTimeoutMs = updateTimeoutMs;
+    this.#intervalMs = mode === "informative" ? 5_000 : mode === "balanced" ? 3_000 : SLACK_PROGRESS_INTERVAL_MS;
   }
 
   record(event: RpcRecord): void {
     if (!this.#accepting) return;
     const configuredChanged = this.#configuredTranscript.record(event);
-    const summaryChanged = this.#summaryTranscript?.record(event) ?? false;
-    const activeChanged = this.#usingSummaryFallback
-      ? summaryChanged
+    const fallbackChanged = this.#fallbackTranscript?.record(event) ?? false;
+    const activeChanged = this.#usingFallback
+      ? fallbackChanged
       : configuredChanged;
     if (!activeChanged) return;
     this.#queuedUpdate = { state: "working" };
@@ -126,6 +133,14 @@ export class SlackProgressReporter {
     await this.#drainAll();
   }
 
+  async fail(reference: string): Promise<void> {
+    if (this.#discardPending) return;
+    this.#accepting = false;
+    this.#clearTimer();
+    this.#queuedUpdate = { state: "failed", reference };
+    await this.#drainAll();
+  }
+
   async close(): Promise<void> {
     this.#accepting = false;
     this.#discardPending = true;
@@ -140,7 +155,7 @@ export class SlackProgressReporter {
     const now = Date.now();
     const delay = Math.max(
       0,
-      SLACK_PROGRESS_INTERVAL_MS - (now - this.#lastUpdateAt),
+      this.#intervalMs - (now - this.#lastUpdateAt),
       this.#notBefore - now,
     );
     this.#timer = setTimeout(() => {
@@ -176,7 +191,7 @@ export class SlackProgressReporter {
       const update = this.#queuedUpdate;
       this.#queuedUpdate = undefined;
       this.#lastUpdateAt = Date.now();
-      await this.#attemptUpdate(update.state, update.failure);
+      await this.#attemptUpdate(update.state, update.failure ?? update.reference);
       // record() or complete() may replace the queue while the request awaits.
       const nextUpdate = this.#queuedUpdate as QueuedProgressUpdate | undefined;
       if (nextUpdate && nextUpdate.state !== "working") continue;
@@ -193,6 +208,7 @@ export class SlackProgressReporter {
   }
 
   async #updateWithTimeout(text: string): Promise<void> {
+    if (text === this.#lastRenderedText) return;
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
@@ -206,6 +222,7 @@ export class SlackProgressReporter {
     });
     try {
       await Promise.race([Promise.resolve().then(() => this.#update(text)), timeout]);
+      this.#lastRenderedText = text;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -213,37 +230,33 @@ export class SlackProgressReporter {
 
   async #attemptUpdate(
     state: ProgressState,
-    failure?: DeliveryFailure,
+    detail?: DeliveryFailure | string,
   ): Promise<void> {
-    // Working updates are superseded within a second; only the final state is
-    // worth waiting for, or the message stays "working" forever.
+    // Transient failures must not downgrade the payload. Final receipts get a
+    // bounded retry budget, including delivery-failed and turn-failed receipts.
     const maxAttempts = state === "working" ? 1 : FINAL_UPDATE_ATTEMPTS;
     for (let attempt = 1; ; attempt += 1) {
-      // complete() bypasses the working-update scheduler, so every attempt
-      // must respect the cooldown left by either a working or final update.
+      // Completion/failure bypasses the working scheduler, but not Slack's
+      // retry-after cooldown. Shutdown can cancel even a long cooldown.
       const delay = this.#notBefore - Date.now();
       if (delay > 0) await sleep(delay, this.#retryAbort.signal);
       if (this.#discardPending) return;
-      const transcript = this.#usingSummaryFallback
-        ? this.#summaryTranscript ?? this.#configuredTranscript
+      const transcript = this.#usingFallback
+        ? this.#fallbackTranscript ?? this.#configuredTranscript
         : this.#configuredTranscript;
       try {
-        await this.#updateWithTimeout(transcript.render(state, failure));
+        await this.#updateWithTimeout(transcript.render(state, detail));
         return;
       } catch (error) {
-        this.#reportError(
-          error,
-          this.#usingSummaryFallback ? "summary-fallback" : "configured",
-        );
+        this.#reportError(error, this.#usingFallback ? this.#fallbackAttempt : "configured");
         const transient = transientFailure(error);
         if (transient) {
           this.#notBefore = Date.now() + transient.retryAfterMs;
           if (attempt >= maxAttempts) return;
           continue;
         }
-        // Slack rejected this payload; the compact summary is the only retry.
-        if (this.#usingSummaryFallback || !this.#summaryTranscript) return;
-        this.#usingSummaryFallback = true;
+        if (this.#usingFallback || !this.#fallbackTranscript) return;
+        this.#usingFallback = true;
       }
     }
   }

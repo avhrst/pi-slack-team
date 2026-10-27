@@ -8,8 +8,8 @@ Each runtime instance requires its own Slack app, bot token, app-level Socket Mo
 
 Import one of these files in the Slack app configuration UI:
 
-- [worker-agent.example.yaml](../manifests/worker-agent.example.yaml) — DMs and explicit mentions only;
-- [manager-agent.example.yaml](../manifests/manager-agent.example.yaml) — worker events plus ordinary public/private channel messages.
+- [worker-agent.example.yaml](../manifests/worker-agent.example.yaml) — DMs, mentions and subsequent replies in engaged threads;
+- [manager-agent.example.yaml](../manifests/manager-agent.example.yaml) — the same events, with ambient public/private channel observation enabled by its role.
 
 Customize only display information and suggested prompts at first. Neither manifest contains workspace IDs, app IDs, user IDs, tokens, webhook URLs, or other secrets.
 
@@ -25,7 +25,7 @@ The examples intentionally disable Slack interactivity. Pi confirmation/select/i
 
 For an existing app, update its manifest or edit **Event Subscriptions → Subscribe to bot events** directly.
 
-### Event differences
+### Event subscriptions
 
 | Event | Worker | Manager | Purpose |
 | --- | :---: | :---: | --- |
@@ -33,8 +33,8 @@ For an existing app, update its manifest or edit **Event Subscriptions → Subsc
 | `assistant_thread_started` | Yes | Yes | Slack Agent lifecycle; session creation remains lazy |
 | `message.im` | Yes | Yes | Direct messages |
 | `app_mention` | Yes | Yes | Explicit public/private channel requests |
-| `message.channels` | No | Yes | Ambient public-channel observation |
-| `message.groups` | No | Yes | Ambient private-channel observation |
+| `message.channels` | Yes | Yes | Engaged thread replies; managers also observe ambient messages |
+| `message.groups` | Yes | Yes | Private-thread replies; managers also observe ambient messages |
 
 ### Bot scopes
 
@@ -106,7 +106,7 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: summary
+  progressMode: console
 
 # Optional manager example. Put the reciprocal manager identity on the worker.
 interAgent:
@@ -201,7 +201,9 @@ systemctl enable --now pi-slack-team@<unix-user>.service
 
 - Authorized DM creates one Pi session and one final response.
 - Authorized channel mention creates/resumes the correct thread session.
-- An unmentioned channel message creates no session.
+- An unmentioned reply in an engaged thread resumes the session; an unrelated unmentioned channel message creates no worker session.
+- Pi dialog answers work in that thread without another mention and remain bound to the current requester.
+- Console output retains commentary, tool results and one final answer; long tool results show 10 lines and a hidden-line count.
 - Unauthorized and ordinary bot-authored messages create no session.
 - A repeated Slack event executes no second Pi turn.
 

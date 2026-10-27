@@ -11,7 +11,7 @@ slack:
   # Manager observations remain restricted to explicitly authorized humans.
   allowedUserIds:
     - U0000000000
-  progressMode: summary
+  progressMode: console
 
 # Replace each synthetic peer identity and configure the reciprocal dev peer on
 # that worker before enabling delegation.
@@ -38,7 +38,7 @@ pi:
   maxActiveSessions: 1
   idleTimeoutMs: 300000
 
-# The Slack app must subscribe to message.channels and message.groups in
-# addition to the worker events. Production credentials are loaded from:
+# Both roles subscribe to message.channels and message.groups; the role controls
+# ambient observation versus engaged-thread replies. Production credentials:
 #   $CREDENTIALS_DIRECTORY/slack_bot_token
 #   $CREDENTIALS_DIRECTORY/slack_app_token

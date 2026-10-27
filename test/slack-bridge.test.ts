@@ -1,24 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { agentConfigSchema } from "../src/config/schema.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { agentConfigSchema, type AgentConfig } from "../src/config/schema.js";
 import type { InterAgentGateway } from "../src/inter-agent/gateway.js";
 import type { Logger } from "../src/observability/logger.js";
-import type { ChatService, MessageHooks } from "../src/routing/chat-service.js";
+import { ChatService, type MessageHooks, type PiPromptRunner } from "../src/routing/chat-service.js";
 import type { IncomingSlackMessage } from "../src/routing/chat-key.js";
+import { Registry } from "../src/storage/registry.js";
+import type { ProgressMode } from "../src/slack/pi-progress.js";
 
 const slack = vi.hoisted(() => ({
   listeners: new Map<string, (args: Record<string, unknown>) => Promise<void>>(),
   postMessage: vi.fn(),
   update: vi.fn(),
   progressUpdate: vi.fn(),
+  progressPost: vi.fn(),
+  progressDelete: vi.fn(),
+  replies: vi.fn(),
 }));
 
 vi.mock("@slack/bolt", () => ({
   LogLevel: { ERROR: "error" },
   SocketModeReceiver: class {
-    client = { on: vi.fn(), off: vi.fn() };
+    client = { on: vi.fn(), off: vi.fn(), removeListener: vi.fn() };
   },
   App: class {
-    client = { chat: { postMessage: slack.postMessage, update: slack.update } };
+    client = {
+      chat: { postMessage: slack.postMessage, update: slack.update },
+      auth: { test: async () => ({ team_id: "T01", user_id: "UBOT" }) },
+      conversations: { replies: slack.replies },
+    };
+    async start() {}
+    async stop() {}
     event(name: string, listener: (args: Record<string, unknown>) => Promise<void>) {
       slack.listeners.set(name, listener);
     }
@@ -28,7 +42,7 @@ vi.mock("@slack/bolt", () => ({
 
 vi.mock("@slack/web-api", () => ({
   WebClient: class {
-    chat = { update: slack.progressUpdate };
+    chat = { update: slack.progressUpdate, postMessage: slack.progressPost, delete: slack.progressDelete };
   },
 }));
 
@@ -39,7 +53,7 @@ const config = agentConfigSchema.parse({
   agentId: "deploy",
   expectedUnixUser: "deploy-agent",
   stateDir: "/tmp/pi-slack-bridge-test",
-  slack: { teamId: "T01", appId: "A01", allowedUserIds: ["U01"] },
+  slack: { teamId: "T01", appId: "A01", allowedUserIds: ["U01"], progressMode: "summary" },
   pi: { cwd: "/tmp", agentDir: "/tmp", sessionDir: "/tmp/sessions" },
 });
 
@@ -50,7 +64,7 @@ const logger: Logger = {
   error: vi.fn(),
 } as unknown as Logger;
 
-function bridge(handle: (hooks: MessageHooks) => Promise<string>) {
+function bridge(handle: (hooks: MessageHooks) => Promise<string>, settings: AgentConfig | ProgressMode = config) {
   const chatService = {
     claimEvent: () => true,
     handleMessage: async (_message: IncomingSlackMessage, hooks: MessageHooks) => {
@@ -65,7 +79,7 @@ function bridge(handle: (hooks: MessageHooks) => Promise<string>) {
     isTrustedManagerUser: () => false,
   } as unknown as InterAgentGateway;
   return new SlackBridge(
-    config,
+    typeof settings === "string" ? { ...config, slack: { ...config.slack, progressMode: settings } } : settings,
     { botToken: "xoxb-test", appToken: "xapp-test" },
     chatService,
     interAgent,
@@ -87,6 +101,7 @@ async function directMessage(): Promise<void> {
 beforeEach(() => {
   slack.update.mockResolvedValue({ ok: true });
   slack.progressUpdate.mockResolvedValue({ ok: true });
+  slack.replies.mockResolvedValue({ ok: true, messages: [] });
 });
 
 afterEach(() => {
@@ -95,6 +110,173 @@ afterEach(() => {
 });
 
 describe("SlackBridge response delivery", () => {
+  it("streams delegated work but posts the final answer only in its correlated response", async () => {
+    vi.useFakeTimers();
+    const messages = new Map<string, string>();
+    slack.progressPost.mockImplementation(async ({ text }: { text: string }) => {
+      const ts = String(messages.size + 1);
+      messages.set(ts, text);
+      return { ts };
+    });
+    slack.progressUpdate.mockImplementation(async ({ ts, text }: { ts: string; text: string }) => { messages.set(ts, text); return { ok: true }; });
+    slack.progressDelete.mockImplementation(async ({ ts }: { ts: string }) => { messages.delete(ts); return { ok: true }; });
+    const runtime = bridge(async (hooks) => {
+      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Checking." }] } });
+      hooks.onPiEvent?.({ type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: { path: "/tmp/report" } });
+      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "tool", result: { content: [{ type: "text", text: "ok" }] } });
+      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Final delegated answer." }] } });
+      return "Final delegated answer.";
+    }, {
+      ...config, slack: { ...config.slack, progressMode: "console" },
+      interAgent: { peers: [{ agentId: "manager", role: "manager", appId: "A02", botUserId: "UMANAGER" }],
+        requestTimeoutMs: 60_000, maxTaskChars: 30_000, maxResponseChars: 50_000 },
+    });
+    try {
+      await runtime.start();
+      const handling = slack.listeners.get("app_mention")!({
+        body: { event_id: "EvDelegate", team_id: "T01", api_app_id: "A01" },
+        event: { channel: "C01", channel_type: "channel", user: "UMANAGER", bot_id: "BMANAGER", app_id: "A02",
+          ts: "1.3", thread_ts: "1.1", text: "<@UBOT> [pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nInspect report" },
+        client: { chat: { postMessage: slack.postMessage, update: slack.update } },
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await handling;
+      const visible = [...messages.values()];
+      expect(visible).toHaveLength(3);
+      expect(visible[0]).toBe("Checking.");
+      expect(visible[1]).toContain("ok");
+      expect(visible[2]).toContain("<@UMANAGER>");
+      expect(visible[2]).toContain("[pi-slack-team:v1:response:123e4567-e89b-12d3-a456-426614174000");
+      expect(visible[2]).toContain("Final delegated answer.");
+      expect(visible.filter((text) => text.includes("Final delegated answer."))).toHaveLength(1);
+      expect(slack.postMessage).not.toHaveBeenCalled();
+    } finally {
+      await runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("delivers the default console as a persistent sequence without a second final answer", async () => {
+    vi.useFakeTimers();
+    const messages = new Map<string, string>();
+    slack.progressPost.mockImplementation(async ({ text }: { text: string }) => {
+      const ts = String(messages.size + 1);
+      messages.set(ts, text);
+      return { ts };
+    });
+    slack.progressUpdate.mockImplementation(async ({ ts, text }: { ts: string; text: string }) => { messages.set(ts, text); return { ok: true }; });
+    const runtime = bridge(async (hooks) => {
+      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Checking." }] } });
+      hooks.onPiEvent?.({ type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: { path: "/tmp/report" } });
+      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "tool", result: { content: [{ type: "text", text: "ok" }] } });
+      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } });
+      return "Done.";
+    }, { ...config, slack: { ...config.slack, progressMode: "console" } });
+    try {
+      const handling = directMessage();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await handling;
+      expect([...messages.values()]).toEqual(["Checking.", expect.stringContaining("ok"), "Done."]);
+      expect(slack.postMessage).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalledWith("slack_message_failed", expect.anything());
+    } finally {
+      await runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])("routes a plain reply into a Pi dialog before queued work (delegation queued: %s)", async (delegationQueued) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pst-bridge-dialog-"));
+    const registry = new Registry(path.join(root, "state.sqlite"));
+    const settings = { ...config, stateDir: root,
+      interAgent: { peers: [{ agentId: "manager", role: "manager" as const, appId: "A02", botUserId: "UMANAGER" }],
+        requestTimeoutMs: 60_000, maxTaskChars: 30_000, maxResponseChars: 50_000 },
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    slack.postMessage.mockResolvedValue({ ts: "posted" });
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (key, owner, _text, _onEvent, _shared, sender) => {
+      if (sender === "UMANAGER") return { text: "Delegated result.", sessionFile: path.join(root, "session.jsonl"), sessionId: "session" };
+      registry.createConversation(key, owner);
+      await gate;
+      const response = await runtime.handlePiUiRequest({
+        conversation: { ...registry.getConversation(key)!, ownerUserId: sender ?? owner },
+        request: { type: "extension_ui_request", method: "confirm", id: "dialog", title: "Continue?" },
+        signal: new AbortController().signal,
+      });
+      expect(response).toEqual({ confirmed: true });
+      registry.setSession(key, path.join(root, "session.jsonl"), "session");
+      return { text: "Confirmed.", sessionFile: path.join(root, "session.jsonl"), sessionId: "session" };
+    });
+    const runtime = new SlackBridge(settings, { botToken: "xoxb-test", appToken: "xapp-test" },
+      new ChatService(settings, registry, { prompt }, logger), {
+        setSlackSender: vi.fn(), parseResponse: () => undefined, isTrustedManagerUser: () => false,
+      } as unknown as InterAgentGateway, logger, () => undefined);
+    try {
+      await runtime.start();
+      const client = { chat: { postMessage: slack.postMessage, update: slack.update }, conversations: { replies: slack.replies } };
+      const handling = slack.listeners.get("app_mention")!({
+        body: { event_id: "Ev1", team_id: "T01", api_app_id: "A01" },
+        event: { channel: "C01", user: "U01", ts: "1.1", text: "<@UBOT> start" }, client,
+      });
+      await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+      const delegated = delegationQueued ? slack.listeners.get("app_mention")!({
+        body: { event_id: "EvDelegate", team_id: "T01", api_app_id: "A01" },
+        event: { channel: "C01", channel_type: "channel", user: "UMANAGER", bot_id: "BMANAGER", app_id: "A02",
+          ts: "1.3", thread_ts: "1.1", text: "<@UBOT> [pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nLater delegated work" }, client,
+      }) : Promise.resolve();
+      release();
+      await vi.waitFor(() => expect(slack.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("Continue?") })));
+      await slack.listeners.get("message")!({
+        body: { event_id: "Ev2", team_id: "T01", api_app_id: "A01" },
+        event: { channel: "C01", channel_type: "channel", user: "U01", ts: "1.2", thread_ts: "1.1", text: "yes" }, client,
+      });
+      await Promise.all([handling, delegated]);
+      expect(prompt).toHaveBeenCalledTimes(delegationQueued ? 2 : 1);
+      expect(slack.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Confirmed." }));
+    } finally {
+      await runtime.stop();
+      registry.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["balanced", "informative"] as const)("preserves %s receipts on delivery failure without replaying work", async mode => {
+    slack.postMessage.mockResolvedValueOnce({ ts: "working-ts" }).mockRejectedValueOnce(new Error("msg_too_long"));
+    const handle = vi.fn(async (hooks: MessageHooks) => {
+      hooks.onPiEvent?.({ type: "agent_progress", text: "Локальну перевірку завершено; production не змінював." });
+      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "read", toolName: "read" });
+      return "Final answer <!channel>";
+    });
+    bridge(handle, mode);
+    await directMessage();
+    expect(handle).toHaveBeenCalledOnce();
+    expect(slack.postMessage).toHaveBeenCalledTimes(2);
+    const receipt = (slack.progressUpdate.mock.lastCall?.[0] as { text: string }).text;
+    expect(receipt).toContain("Pi завершив роботу, але Slack не прийняв частину 1 з 1");
+    expect(receipt).toContain("Локальну перевірку завершено");
+    expect(receipt).toContain("Код звернення:");
+    expect(receipt).not.toContain("Запит не завершено");
+    expect(slack.update).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith("slack_response_delivery_failed", expect.anything());
+    expect(logger.error).not.toHaveBeenCalledWith("slack_message_failed", expect.anything());
+  });
+
+  it.each(["balanced", "informative"] as const)("retains %s milestones for actual turn failures without leaking traces", async mode => {
+    slack.postMessage.mockResolvedValue({ ts: "working-ts" });
+    bridge(async hooks => {
+      hooks.onPiEvent?.({ type: "agent_progress", text: "Потрібно уточнити цілі." });
+      throw new Error("PRIVATE_EXCEPTION_TRACE");
+    }, mode);
+    await directMessage();
+    const receipt = (slack.progressUpdate.mock.lastCall?.[0] as { text: string }).text;
+    expect(receipt).toContain("Потрібно уточнити цілі");
+    expect(receipt).toContain("Код звернення:");
+    expect(receipt).not.toContain("PRIVATE_EXCEPTION_TRACE");
+    expect(slack.update).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith("slack_message_failed", expect.anything());
+  });
+
   it("reports a delivery failure in the receipt without claiming that Pi failed", async () => {
     slack.postMessage
       .mockResolvedValueOnce({ ts: "working-ts" })

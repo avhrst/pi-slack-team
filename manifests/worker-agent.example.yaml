@@ -1,10 +1,10 @@
 display_information:
   name: Example Pi Worker
-  description: On-demand Pi agent for direct messages and explicit channel mentions.
+  description: On-demand Pi agent for direct messages, channel mentions and replies in engaged threads.
   background_color: "#1f2d3d"
   long_description: >-
     Example Pi Worker connects one Slack app to one Linux-isolated Pi agent.
-    It responds to authorized direct messages and explicit channel mentions.
+    It responds to authorized direct messages, channel mentions and replies in engaged threads.
     Each Slack thread maps to a separate persistent Pi session.
 
 features:
@@ -38,6 +38,8 @@ settings:
       - app_home_opened
       - app_mention
       - assistant_thread_started
+      - message.channels
+      - message.groups
       - message.im
   interactivity:
     is_enabled: false

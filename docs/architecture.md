@@ -12,9 +12,9 @@ The Slack/Pi boundary is hidden behind internal adapters so a future SDK-backed 
 
 ## Agent roles
 
-`role: worker` is the backward-compatible default. Workers allocate turns only for authorized DMs and explicit channel mentions.
+`role: worker` is the backward-compatible default. Workers allocate turns for authorized DMs, explicit channel mentions and subsequent allowed-human replies in engaged threads. Both roles subscribe to channel/group messages; the role controls whether unrelated ambient messages are evaluated.
 
-`role: manager` also evaluates ordinary human messages delivered from public and private channels that the Slack app has joined. Ambient messages are wrapped as untrusted observations with sender/channel metadata. The manager may use its configured tools (for example Jira) and publish a threaded response when intervention is useful, or return the internal silent marker to produce no Slack output. Ambient turns never post a working/progress message. Explicit DMs and mentions retain normal worker behavior.
+`role: manager` also evaluates ordinary human messages delivered from public and private channels that the Slack app has joined. Ambient messages are wrapped as untrusted observations with sender/channel metadata. The manager may use its configured tools (for example Jira) and publish a threaded response when intervention is useful, or return the internal silent marker to produce no Slack output. Ambient turns never post a working/progress message. Explicit DMs, mentions and replies in engaged threads retain normal worker behavior.
 
 Manager delivery requires the Slack app event subscriptions `message.channels` and `message.groups`. Runtime authorization still requires `allowedUserIds`. Ordinary bot messages are ignored to prevent agent loops; the only exception is a versioned correlated inter-agent envelope whose sender app ID, bot user ID, role, and direction match `interAgent.peers`.
 
@@ -58,9 +58,11 @@ The durable Slack conversation key is:
 
 Slack conversation identity is intentionally separate from Pi session identity. Direct messages use `(team_id, app_id, user_id)`, so every human has an isolated Pi session per agent and new top-level DMs from that human resume it. Public/private channels use `(team_id, app_id, channel_id, thread_ts)`, so each channel thread remains isolated even when the same human starts several threads.
 
-For a root message without `thread_ts`, its own `ts` becomes the Slack thread root. The first qualifying human normally owns the conversation. When a configured manager delegation creates a worker session, that exact manager bot is only a provisional owner: once the turn is idle, the first allowed human explicit mention may atomically claim it. Authorized humans may contribute to an existing channel-thread session: workers require an explicit mention on every turn, while managers may also process ambient channel messages. The durable owner does not change and remains the only human allowed to answer interactive Pi confirmations.
+For a root message without `thread_ts`, its own `ts` becomes the Slack thread root. The first qualifying human normally owns the conversation. A configured manager bot is a provisional owner: once its delegated turn is idle, an allowed human mention or reply in the engaged thread may atomically claim it. Channel participants must still be allowlisted; the durable owner remains stable after a human claim. Interactive Pi confirmations belong to the current requester, rather than the durable owner, and need no extra mention.
 
-When that first qualifying message creates a Pi session, the worker scans Slack thread history up to the triggering message and injects a bounded snapshot containing the root plus the most recent prior replies. The root message supplies the derived thread title. Prior messages, authors, timestamps, and file metadata are injected as explicitly untrusted user context; the triggering request is kept separate. Resumed Pi sessions do not receive the full transcript again.
+An authorized mention or trusted delegation persists thread engagement before asynchronous preparation. Existing worker channel conversations are backfilled on upgrade; old manager conversations are not inferred to be engaged. New Pi sessions bootstrap bounded prior thread history; resumed thread turns fetch only messages after the last successfully incorporated timestamp. History remains explicitly untrusted and bounded to 200 messages / 50,000 characters. The current request and this agent's output are excluded. A preparation or Pi failure does not advance the cursor. Preparation, execution and final delivery share the serial lane; dialog replies bypass it.
+
+The default `console` renderer retains visible assistant messages and tool calls in sequence, edits active entries in place, previews the first 10 tool-output lines and reconciles the final answer without a second post. Slack delivery is throttled and obeys full cooldowns. Explicit `summary` and `raw` retain legacy rendering. Delegated RPC turns also stream commentary and tools; their final answer is posted once in the existing correlated response envelope so the manager can consume it. Any streamed draft of that final answer is reconciled before the envelope is posted.
 
 ## Process model
 
@@ -75,6 +77,6 @@ When that first qualifying message creates a Pi session, the worker scans Slack 
 
 ## Storage
 
-SQLite contains routing state, event IDs, and pending interaction metadata. It never contains Slack or model credentials. Inter-agent response correlation is intentionally in memory; the local Unix socket carries no credential and is accessible only to the manager UID.
+SQLite contains routing state, thread engagement/context cursors, event IDs, and pending interaction metadata. It never contains Slack or model credentials. Inter-agent response correlation is intentionally in memory; the local Unix socket carries no credential and is accessible only to the manager UID.
 
 Pi remains the source of truth for conversation history. SQLite stores only the path and ID required to resume that Pi session.

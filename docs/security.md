@@ -17,6 +17,7 @@ The MVP therefore defaults to:
 - a required explicit Slack user allowlist for DMs, mentions, and manager observations;
 - one Slack app per Unix agent;
 - Slack progress defaults to visible assistant text and tool names only;
+- `progressMode: console` is the default and exposes commands/paths plus compact tool previews to readers of the thread; select `summary` to hide tool details;
 - `progressMode: raw` is an explicit per-agent opt-in that exposes bounded tool arguments and output in the authorized conversation, with an automatic summary fallback when Slack rejects a detailed update;
 - private model thinking is never sent to Slack in either progress mode;
 - model output, Pi dialog text, and delegated task bodies are posted with Slack's `&`, `<`, `>` escaped, so they cannot ping `<!channel>`, mention users, or emit raw Slack links, and posts never unfurl; inbound Slack entities are decoded once at parse time, and decoded text cannot close the prompt's untrusted-content wrappers. This is not link-spoof protection: a model-written Markdown link to an http(s) URL still renders with model-chosen label text;
@@ -45,7 +46,7 @@ Inter-agent delegation preserves this boundary: Slack carries the request betwee
 
 Configuring a manager peer is a transitive authorization decision. The worker will treat a correctly authenticated manager envelope as an authorized request even though the manager bot is not in `allowedUserIds`. Keep peer lists narrow, use exact app and bot-user IDs, and ensure manager instructions apply the originating human's authorization and all worker safety constraints before delegation.
 
-A manager bot that creates a worker conversation is a provisional owner only. Ownership transfer requires an explicit mention from an allowed human, an exact configured manager bot as the existing owner, and an idle or error conversation. The compare-and-set update permits only one claimant; after a human claim, normal worker anti-takeover checks apply.
+A manager bot that creates a worker conversation is a provisional owner only. Ownership transfer requires a mention or a reply in the engaged thread from an allowed human, an exact configured manager bot as the existing owner, and an idle or error conversation. The compare-and-set update permits only one claimant; after a human claim, normal worker anti-takeover checks apply.
 
 ## Interactive requests
 
@@ -53,7 +54,7 @@ Pi confirmation and selection requests are bound to:
 
 - Slack workspace and app;
 - channel and thread;
-- Slack user;
+- current authenticated requester (not necessarily the durable conversation owner);
 - Pi conversation;
 - opaque one-time request ID;
 - expiration time.

@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { agentConfigSchema, type AgentConfig } from "../src/config/schema.js";
 import { Registry } from "../src/storage/registry.js";
 import type { PiUiRequestContext } from "../src/pi/session-pool.js";
+import type { RpcRecord } from "../src/pi/rpc-client.js";
 import { ChatService } from "../src/routing/chat-service.js";
 import { delegationRequestText } from "../src/inter-agent/protocol.js";
 import { createLogger } from "../src/observability/logger.js";
@@ -114,6 +115,29 @@ function delegation(target: AgentConfig): Delegation {
 }
 
 describe("tmux configuration and relay policy", () => {
+  it("signals timed-out and aborted waits instead of accumulating killed tmux waiters", async () => {
+    vi.useFakeTimers();
+    try {
+      const mailbox = new TmuxMailbox("/unused", "/unused");
+      let release: (() => void) | undefined;
+      const exec = vi.spyOn(mailbox, "exec").mockImplementation(async (args) => {
+        if (args[1] === "-S") { release?.(); return ""; }
+        return new Promise<string>((resolve) => { release = () => resolve(""); });
+      });
+      const controller = new AbortController();
+      const timed = mailbox.wait(controller.signal, 100);
+      await vi.advanceTimersByTimeAsync(100);
+      await timed;
+      expect(exec).toHaveBeenCalledWith(["wait-for", "pst-wake"], undefined, 5_100);
+      expect(exec).toHaveBeenCalledWith(["wait-for", "-S", "pst-wake"]);
+      exec.mockClear();
+      const cancelled = mailbox.wait(controller.signal, 1_000);
+      controller.abort();
+      await cancelled;
+      expect(exec).toHaveBeenCalledWith(["wait-for", "-S", "pst-wake"]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("forces one resident process/turn while keeping legacy RPC defaults", () => {
     const cfg = config();
     expect(cfg.pi.maxConcurrentTurns).toBe(1);
@@ -169,6 +193,54 @@ describe("tmux configuration and relay policy", () => {
 });
 
 describe.skipIf(!available)("real tmux mailbox integration", () => {
+  it("drains more than 16 fast events before returning a completed result, even for a slow reader", async () => {
+    const cfg = config();
+    const agent = await fakeAgent(cfg, async () => {
+      await agent.emit("message_start", { message: { role: "assistant", content: [] } });
+      await agent.emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "Checking tools." } });
+      await agent.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Checking tools." }], stopReason: "stop" } });
+      for (let i = 0; i < 40; i++) {
+        await agent.emit("tool_execution_start", { toolCallId: `call-${i}`, toolName: "read", args: { path: `/tmp/${i}` } });
+        await agent.emit("tool_execution_end", { toolCallId: `call-${i}`, toolName: "read", result: { content: [{ type: "text", text: `result-${i}` }] } });
+      }
+      await agent.emit("message_start", { message: { role: "assistant", content: [] } });
+      await agent.emit("message_update", { assistantMessageEvent: { type: "thinking_delta", delta: "PRIVATE" } });
+      await agent.emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "Finished." } });
+      return "Finished.";
+    });
+    const registry = new Registry(path.join(cfg.stateDir, "state.sqlite"));
+    cleanup.push(() => registry.close());
+    const runner = new TmuxAgentRunner(cfg, agent.configPath, registry, logger);
+    await runner.start();
+    cleanup.push(() => runner.shutdown());
+    const originalRead = TmuxMailbox.prototype.readIfPresent;
+    vi.spyOn(TmuxMailbox.prototype, "readIfPresent").mockImplementation(async function (this: TmuxMailbox, name) {
+      if (name.startsWith("pst-events-")) await new Promise((resolve) => setTimeout(resolve, 100));
+      return originalRead.call(this, name);
+    });
+    const originalList = TmuxMailbox.prototype.list;
+    let deferredPackets = false;
+    vi.spyOn(TmuxMailbox.prototype, "list").mockImplementation(async function (this: TmuxMailbox, prefix) {
+      const names = await originalList.call(this, prefix);
+      if (!deferredPackets && names.some((name) => name.startsWith("pst-done-"))) {
+        deferredPackets = true;
+        return names.filter((name) => !name.startsWith("pst-events-"));
+      }
+      return names;
+    });
+    const received: RpcRecord[] = [];
+    const result = await runner.prompt({ teamId: "TTEST", appId: "AWORKER", channelId: "CTEST", threadTs: "1.0" },
+      "UALICE", "inspect tools", (event) => received.push(event));
+    expect(result.text).toBe("Finished.");
+    expect(received.filter((event) => event.type === "tool_execution_start")).toHaveLength(40);
+    expect(received.filter((event) => event.type === "tool_execution_end")).toHaveLength(40);
+    expect(received.at(-1)).toMatchObject({ type: "message_end", message: { content: [{ text: "Finished." }] } });
+    expect(JSON.stringify(received)).toContain("Checking tools.");
+    expect(JSON.stringify(received)).not.toContain("PRIVATE");
+    expect(await agent.mailbox.list("pst-events-")).toEqual([]);
+    expect(agent.calls).toHaveLength(1);
+  }, 20_000);
+
   it("keeps the peer receiver healthy if relay cleanup removes a listed inbox", async () => {
     const cfg = config();
     const agent = await fakeAgent(cfg, async () => "next-result");
@@ -195,6 +267,28 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     }, "UALICE", "next-task")).resolves.toMatchObject({ text: "next-result" });
     await expect(runner.health()).resolves.toMatchObject({ agentId: cfg.agentId });
   }, 20_000);
+  it("flushes public commentary on fast turns and preserves it across tool bursts", async () => {
+    const cfg = config();
+    const agent = await fakeAgent(cfg, async () => {
+      await agent.emit("message_end", { message: { role: "assistant", stopReason: "toolUse", content: [
+        { type: "thinking", thinking: "PRIVATE_THINKING" },
+        { type: "text", text: "Перевіряю налаштування, щоб знайти причину збою." },
+        { type: "toolCall", name: "read", arguments: { path: "private-path" } },
+      ] } });
+      for (let i = 0; i < 80; i++) await agent.emit("tool_execution_update", { type: "tool_execution_update", toolCallId: "read-1", toolName: "read", partialResult: { content: [{ type: "text", text: `trace ${i}` }] } });
+      return "FINAL_RESULT";
+    });
+    const id = crypto.randomUUID();
+    await agent.mailbox.put(bufferName("run", id), { id, text: "task", origin: { kind: "local" }, createdAt: Date.now(), expiresAt: Date.now() + 30_000 });
+    await until(async () => (await agent.mailbox.list()).includes(bufferName("done", id)));
+    const names = await agent.mailbox.list(`${bufferName("events", id)}-`);
+    const packets = await Promise.all(names.map((name) => agent.mailbox.read(name))) as Array<{ events: Array<{ event: RpcRecord }> }>;
+    const events = packets.flatMap((packet) => packet.events.map((item) => item.event));
+    expect(JSON.stringify(events)).toContain("Перевіряю налаштування");
+    expect(JSON.stringify(events)).not.toMatch(/PRIVATE_THINKING|private-path/);
+    expect(JSON.stringify(events.filter((event) => event.type === "agent_progress"))).not.toContain("FINAL_RESULT");
+    expect(JSON.stringify(events.filter((event) => event.type === "message_end"))).toContain("FINAL_RESULT");
+  });
 
   it("round-trips Unicode/multiline data without executing shell syntax; bounds input", async () => {
     const cfg = config();
@@ -295,14 +389,23 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     const manager = config("manager");
     const worker = config();
     const managerAgent = await fakeAgent(manager);
-    const workerAgent = await fakeAgent(worker, async () => "worker-result");
+    const workerAgent = await fakeAgent(worker, async () => {
+      await workerAgent.emit("message_end", { message: { role: "assistant", stopReason: "toolUse", content: [
+        { type: "text", text: "Перевіряю потрібні матеріали; змін поки не вносив." },
+        { type: "thinking", thinking: "PRIVATE_THINKING" },
+        { type: "toolCall", name: "read", arguments: { path: "PRIVATE_PATH" } },
+      ] } });
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      return "worker-result";
+    });
     const registry = new Registry(path.join(worker.stateDir, "state.sqlite"));
     cleanup.push(() => registry.close());
     const runner = new TmuxAgentRunner(worker, workerAgent.configPath, registry, logger);
     await runner.start();
     cleanup.push(() => runner.shutdown());
     const tool = managerAgent.tools.get("delegate_to_worker")!;
-    const result = tool.execute("tool-1", { workerId: "worker", task: "test delegated task" }, new AbortController().signal);
+    const updates: unknown[] = [];
+    const result = tool.execute("tool-1", { workerId: "worker", task: "test delegated task" }, new AbortController().signal, (update) => updates.push(update));
     // Observe errors immediately, even if an assertion below fails.
     void result.catch(() => undefined);
     await until(async () => (await managerAgent.mailbox.list("pst-out-request-")).length === 1);
@@ -313,6 +416,8 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     const restarted = new TmuxRelay([manager, worker], logger);
     await until(async () => { await restarted.tick(); return (await managerAgent.mailbox.list("pst-out-request-")).length === 0; });
     expect((await result).content[0]?.text).toBe("worker-result");
+    expect(JSON.stringify(updates)).toContain("Перевіряю потрібні матеріали");
+    expect(JSON.stringify(updates)).not.toMatch(/PRIVATE_THINKING|PRIVATE_PATH/);
     expect(workerAgent.calls).toHaveLength(1);
     expect(workerAgent.calls[0]).toContain("Delegated by trusted configured agent: manager");
   }, 20_000);

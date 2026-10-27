@@ -13,6 +13,7 @@ export interface RpcClientOptions {
   sessionFile?: string;
   sessionName?: string;
   requestTimeoutMs: number;
+  appendSystemPrompt?: string;
   extensionPaths?: string[];
   environment?: NodeJS.ProcessEnv;
   maxLineBytes?: number;
@@ -74,6 +75,7 @@ export class RpcClient extends EventEmitter {
     if (this.#child) throw new Error("RPC client has already been started");
 
     const args = ["--mode", "rpc"];
+    if (this.#options.appendSystemPrompt) args.push("--append-system-prompt", this.#options.appendSystemPrompt);
     for (const extensionPath of this.#options.extensionPaths ?? []) {
       args.push("--extension", extensionPath);
     }

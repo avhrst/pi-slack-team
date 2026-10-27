@@ -6,18 +6,32 @@ export interface SequencedEvent {
 }
 
 /**
- * Bounded progress buffer for one tmux run. Only the latest partial result of a
- * tool call matters, so updates are coalesced and evicted before the start/end
- * events that drive Slack tool counts.
+ * Unpublished events for one run. Only mutable snapshots may be coalesced.
+ * Structural events survive until persisted to immutable mailbox packets;
+ * the consumer acknowledges those packets by removing them after reading.
  */
 export class RunEventWindow {
   #events: SequencedEvent[] = [];
   #sequence = 0;
 
-  constructor(readonly limit = 16) {}
+  constructor(readonly limit = 16, readonly milestoneLimit = 0) {}
 
   get events(): readonly SequencedEvent[] {
     return this.#events;
+  }
+
+  get sequence(): number { return this.#sequence; }
+
+  batch(): readonly SequencedEvent[] {
+    let bytes = 0;
+    return this.#events.slice(0, this.limit).filter((item) => {
+      bytes += Buffer.byteLength(JSON.stringify(item));
+      return bytes < 900_000;
+    });
+  }
+
+  published(throughSequence: number): void {
+    this.#events = this.#events.filter((item) => item.sequence > throughSequence);
   }
 
   push(event: RpcRecord): void {
@@ -25,10 +39,15 @@ export class RunEventWindow {
       this.#events = this.#events.filter((item) =>
         item.event.type !== "tool_execution_update" || item.event.toolCallId !== event.toolCallId);
     }
+    if (event.type === "message_update" && typeof event.messageId === "number") {
+      this.#events = this.#events.filter((item) =>
+        item.event.type !== "message_update" || item.event.messageId !== event.messageId);
+    }
     this.#events.push({ sequence: ++this.#sequence, event });
-    while (this.#events.length > this.limit) {
-      const update = this.#events.findIndex((item) => item.event.type === "tool_execution_update");
-      this.#events.splice(Math.max(update, 0), 1);
+    if (this.milestoneLimit > 0) {
+      while (this.#events.filter((item) => item.event.type === "agent_progress").length > this.milestoneLimit) {
+        this.#events.splice(this.#events.findIndex((item) => item.event.type === "agent_progress"), 1);
+      }
     }
   }
 

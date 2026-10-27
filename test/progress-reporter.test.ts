@@ -30,6 +30,37 @@ function rawToolEvents(reporter: SlackProgressReporter): void {
 }
 
 describe("SlackProgressReporter", () => {
+  it("throttles balanced updates and suppresses unchanged rendered activity", async () => {
+    vi.useFakeTimers();
+    try {
+      const update = vi.fn(async () => undefined);
+      const reporter = new SlackProgressReporter("balanced", update, () => undefined);
+      reporter.record(event("tool_execution_start", { toolName: "read", toolCallId: "one" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+      reporter.record(event("tool_execution_end", { toolName: "read", toolCallId: "one" }));
+      reporter.record(event("tool_execution_start", { toolName: "read", toolCallId: "two" }));
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(update).toHaveBeenCalledTimes(1);
+      reporter.record(event("agent_progress", { text: "Знайшов причину, перевіряю виправлення." }));
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(update).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(update).toHaveBeenCalledTimes(2);
+      await reporter.close();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("retains balanced milestones on failure without publishing exception traces", async () => {
+    const updates: string[] = [];
+    const reporter = new SlackProgressReporter("balanced", async (text) => { updates.push(text); }, () => undefined);
+    reporter.record(event("agent_progress", { text: "Потрібне уточнення цільового середовища." }));
+    await reporter.fail("request-123");
+    expect(updates.at(-1)).toContain("Не вдалося завершити запит");
+    expect(updates.at(-1)).toContain("Потрібне уточнення");
+    expect(updates.at(-1)).toContain("request-123");
+  });
+
   it("retries a rejected raw update with a compact summary", async () => {
     const updates: string[] = [];
     const errors: ProgressUpdateAttempt[] = [];
@@ -357,6 +388,46 @@ describe("SlackProgressReporter", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each(["balanced", "informative"] as const)("honors full Retry-After without downgrading %s delivery-failed receipts", async mode => {
+    vi.useFakeTimers();
+    try {
+      const attempts: ProgressUpdateAttempt[] = [];
+      const update = vi.fn<(text: string) => Promise<void>>(async () => {
+        if (update.mock.calls.length === 1) throw rateLimited(30);
+      });
+      const reporter = new SlackProgressReporter(mode, update, (_error, attempt) => attempts.push(attempt));
+      reporter.record(event("agent_progress", { text: "Перевірку завершено без змін production." }));
+      const completing = reporter.complete({ posted: 0, total: 1, correlationId: "ref-020-to-030" });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(update).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await completing;
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(attempts).toEqual(["configured"]);
+      const receipt = update.mock.calls.at(-1)?.[0];
+      expect(receipt).toContain("Slack не прийняв частину 1 з 1");
+      expect(receipt).toContain("Перевірку завершено");
+      expect(receipt).toContain("ref-020-to-030");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["balanced", "informative"] as const)("cancels %s failure-receipt cooldowns and ignores failure after close", async mode => {
+    vi.useFakeTimers();
+    try {
+      const update = vi.fn<(text: string) => Promise<void>>(async () => { throw rateLimited(30); });
+      const reporter = new SlackProgressReporter(mode, update, () => undefined);
+      const failing = reporter.fail("ref-failed");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(update).toHaveBeenCalledTimes(1);
+      await Promise.all([reporter.close(), failing]);
+      await reporter.fail("ref-after-close");
+      await reporter.complete();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("cancels the Retry-After wait when closed", async () => {

@@ -14,7 +14,7 @@ import type {
   ChatService,
   MessageDisposition,
 } from "../routing/chat-service.js";
-import type { PiUiRequestContext } from "../pi/session-pool.js";
+import type { PiTurnResult, PiUiRequestContext } from "../pi/session-pool.js";
 import { EMPTY_TURN_TEXT } from "../pi/turn-text.js";
 import { matchAutomaticSelect } from "../pi/ui-policy.js";
 import {
@@ -23,6 +23,7 @@ import {
   type IncomingSlackMessage,
 } from "../routing/chat-key.js";
 import { chunkSlackText } from "./chunk-text.js";
+import { SlackConsoleReporter, SlackDeliveryQueue } from "./console-reporter.js";
 import { SlackConnectionMonitor } from "./connection-monitor.js";
 import { downloadSlackFiles } from "./file-download.js";
 import {
@@ -58,6 +59,8 @@ export class SlackBridge {
   readonly #progressClient: WebClient;
   readonly #botToken: string;
   readonly #uiBroker = new SlackUiBroker();
+  readonly #deliveryQueue = new SlackDeliveryQueue();
+  readonly #consoleReporters = new Set<SlackConsoleReporter>();
   readonly #delegatedTurns = new Map<string, number>();
   #botUserId: string | undefined;
 
@@ -137,6 +140,8 @@ export class SlackBridge {
   async stop(): Promise<void> {
     this.#connectionMonitor.stop();
     this.#uiBroker.cancelAll();
+    this.#deliveryQueue.close();
+    await Promise.allSettled([...this.#consoleReporters].map((reporter) => reporter.close()));
     await this.#app.stop();
   }
 
@@ -181,7 +186,6 @@ export class SlackBridge {
         await this.#routeMessage(directMessage, client);
         return;
       }
-      if (this.#config.role !== "manager") return;
       const channelMessage = parseChannelMessageEvent(
         body,
         event,
@@ -246,23 +250,18 @@ export class SlackBridge {
     message: IncomingSlackMessage,
     client: App["client"],
   ): Promise<void> {
-    const managerObservation =
+    let managerObservation =
       this.#config.role === "manager" && message.kind === "channel-message";
     const delegatedRequest = this.#config.pi.transport === "tmux"
       ? undefined : incomingDelegationRequest(this.#config, message);
     const delegatedKey = delegatedRequest
       ? serializeConversationKey(conversationKey(message))
       : undefined;
-    if (delegatedKey) {
-      this.#delegatedTurns.set(
-        delegatedKey,
-        (this.#delegatedTurns.get(delegatedKey) ?? 0) + 1,
-      );
-    }
+    let delegatedAccepted = false;
     let workingTs: string | undefined;
     let progressUpdateSequence = 0;
     const progress = new SlackProgressReporter(
-      this.#config.slack.progressMode,
+      this.#config.slack.progressMode === "console" ? "summary" : this.#config.slack.progressMode,
       async (text) => {
         if (!workingTs) return;
         const updateSequence = ++progressUpdateSequence;
@@ -290,12 +289,97 @@ export class SlackBridge {
         });
       },
     );
+    const consoleReporter = this.#config.slack.progressMode === "console"
+      ? new SlackConsoleReporter(this.#deliveryQueue, {
+          post: async (text) => {
+            const posted = await this.#progressClient.chat.postMessage({
+              unfurl_links: false, unfurl_media: false,
+              channel: message.channelId, thread_ts: message.threadTs ?? message.ts, text,
+            });
+            if (!posted.ts) throw new Error("Slack did not return a message timestamp");
+            return posted.ts;
+          },
+          update: async (ts, text) => {
+            await this.#progressClient.chat.update({ channel: message.channelId, ts, text });
+          },
+          remove: async (ts) => {
+            await this.#progressClient.chat.delete({ channel: message.channelId, ts });
+          },
+        }, (error) => this.#logger.warn("slack_console_delivery_failed", {
+          agentId: this.#config.agentId, eventId: message.eventId, error,
+        }))
+      : undefined;
+    if (consoleReporter) this.#consoleReporters.add(consoleReporter);
+    let finalized = false;
+    const finishResponse = async (result: PiTurnResult): Promise<void> => {
+      finalized = true;
+      const responseText = managerObservation
+        ? managerVisibleResponse(result.text)
+        : result.text;
+      if (!responseText) {
+        await progress.close();
+        this.#logger.info("manager_observation_silent", {
+          agentId: this.#config.agentId,
+          eventId: message.eventId,
+        });
+        return;
+      }
+
+      if (consoleReporter) {
+        try {
+          await consoleReporter.complete(responseText, Boolean(delegatedRequest));
+        } catch (error) {
+          const correlationId = crypto.randomUUID();
+          this.#logger.error("slack_response_delivery_failed", {
+            agentId: this.#config.agentId, eventId: message.eventId, correlationId, error,
+          });
+          await client.chat.postMessage({
+            unfurl_links: false, unfurl_media: false,
+            channel: message.channelId, thread_ts: message.threadTs ?? message.ts,
+            text: `Pi completed this request, but Slack delivery was interrupted. Verify the result before repeating actions. Reference: ${correlationId}`,
+          }).catch(() => undefined);
+        }
+        if (!delegatedRequest) return;
+      }
+
+      // The answer goes out before the placeholder update, which may wait out
+      // Slack rate limits; the placeholder is settled even if delivery throws.
+      let delivery: DeliveryResult | undefined;
+      try {
+        const renderedResponse = toSlackMrkdwn(responseText);
+        const outputChunks = delegatedRequest
+          ? delegationResponseMessages(delegatedRequest, renderedResponse)
+          : chunkSlackText(renderedResponse);
+        if (outputChunks.length === 0) outputChunks.push(EMPTY_TURN_TEXT);
+        delivery = await this.#deliverResponse(
+          message,
+          client,
+          workingTs,
+          delegatedRequest,
+          outputChunks,
+          Boolean(consoleReporter),
+        );
+      } finally {
+        if (workingTs) await progress.complete(deliveryFailure(delivery));
+        else await progress.close();
+      }
+    };
     try {
       let disposition: MessageDisposition;
       try {
         disposition = await this.#chatService.handleMessage(message, {
-          onAccepted: async () => {
+          onAccepted: async (context) => {
+            managerObservation = context?.isObservation ?? managerObservation;
+            // Queued delegations must not cancel dialogs in the current human turn.
+            if (delegatedKey) {
+              this.#delegatedTurns.set(delegatedKey, (this.#delegatedTurns.get(delegatedKey) ?? 0) + 1);
+              delegatedAccepted = true;
+            }
             if (managerObservation) return;
+            if (consoleReporter) {
+              await consoleReporter.start(this.#config.pi.transport === "tmux");
+              return;
+            }
             // The placeholder is cosmetic; Pi still runs and answers without it.
             try {
               const posted = await client.chat.postMessage({
@@ -315,7 +399,7 @@ export class SlackBridge {
               });
             }
           },
-          preparePrompt: async ({ isNewConversation }) => {
+          preparePrompt: async ({ isNewConversation, afterTs }) => {
             const currentPrompt = delegatedRequest
               ? delegationPrompt(delegatedRequest)
               : managerObservation && !this.#config.slack.fileUploads
@@ -326,13 +410,16 @@ export class SlackBridge {
                     this.#botToken,
                   );
             let prompt = currentPrompt;
-            if (isNewConversation) {
+            let contextThroughTs: string | undefined;
+            if (isNewConversation || message.kind !== "direct-message" || message.threadTs) {
               try {
                 prompt = await addSlackThreadContext(
                   message,
                   currentPrompt,
                   (arguments_) => client.conversations.replies(arguments_),
+                  { ...(afterTs ? { afterTs } : {}), ...(this.#botUserId ? { botUserId: this.#botUserId } : {}) },
                 );
+                contextThroughTs = message.ts;
               } catch (error) {
                 this.#logger.warn("slack_thread_context_failed", {
                   agentId: this.#config.agentId,
@@ -341,14 +428,33 @@ export class SlackBridge {
                 });
               }
             }
-            return managerObservation
-              ? managerObservationPrompt(message, prompt)
-              : prompt;
+            return {
+              text: managerObservation ? managerObservationPrompt(message, prompt) : prompt,
+              ...(contextThroughTs ? { contextThroughTs } : {}),
+            };
           },
-          onPiEvent: (event) => progress.record(event),
+          onPiEvent: (event) => {
+            if (managerObservation) return;
+            if (consoleReporter) consoleReporter.record(event);
+            else progress.record(event);
+          },
+          onCompleted: finishResponse,
         });
       } catch (error) {
-        await progress.close();
+        const retainProgress = Boolean(workingTs && ["balanced", "informative"].includes(this.#config.slack.progressMode));
+        if (!retainProgress) await progress.close();
+        if (consoleReporter && !managerObservation) {
+          const correlationId = crypto.randomUUID();
+          this.#logger.error("slack_message_failed", {
+            agentId: this.#config.agentId, eventId: message.eventId, correlationId, error,
+          });
+          await consoleReporter.fail(`Pi could not complete this request. Reference: ${correlationId}`)
+            .catch(() => undefined);
+          if (delegatedRequest) await this.#postDelegationError(
+            message, client, delegatedRequest, `Worker could not complete the request. Reference: ${correlationId}`,
+          );
+          return;
+        }
         await this.#reportTurnFailure(
           message,
           client,
@@ -356,6 +462,7 @@ export class SlackBridge {
           delegatedRequest,
           managerObservation,
           error,
+          retainProgress ? progress : undefined,
         );
         return;
       }
@@ -363,41 +470,14 @@ export class SlackBridge {
         await progress.close();
         return;
       }
-
-      const responseText = managerObservation
-        ? managerVisibleResponse(disposition.result.text)
-        : disposition.result.text;
-      if (!responseText) {
-        await progress.close();
-        this.#logger.info("manager_observation_silent", {
-          agentId: this.#config.agentId,
-          eventId: message.eventId,
-        });
-        return;
-      }
-
-      // The answer goes out before the placeholder update, which may wait out
-      // Slack rate limits; the placeholder is settled even if delivery throws.
-      let delivery: DeliveryResult | undefined;
-      try {
-        const renderedResponse = toSlackMrkdwn(responseText);
-        const outputChunks = delegatedRequest
-          ? delegationResponseMessages(delegatedRequest, renderedResponse)
-          : chunkSlackText(renderedResponse);
-        if (outputChunks.length === 0) outputChunks.push(EMPTY_TURN_TEXT);
-        delivery = await this.#deliverResponse(
-          message,
-          client,
-          workingTs,
-          delegatedRequest,
-          outputChunks,
-        );
-      } finally {
-        if (workingTs) await progress.complete(deliveryFailure(delivery));
-        else await progress.close();
-      }
+      // Also supports lightweight adapters that don't implement completion hooks.
+      if (!finalized) await finishResponse(disposition.result);
     } finally {
-      if (delegatedKey) {
+      if (consoleReporter) {
+        await consoleReporter.close();
+        this.#consoleReporters.delete(consoleReporter);
+      }
+      if (delegatedKey && delegatedAccepted) {
         const remaining = (this.#delegatedTurns.get(delegatedKey) ?? 1) - 1;
         if (remaining > 0) this.#delegatedTurns.set(delegatedKey, remaining);
         else this.#delegatedTurns.delete(delegatedKey);
@@ -412,6 +492,7 @@ export class SlackBridge {
     delegatedRequest: IncomingDelegationRequest | undefined,
     managerObservation: boolean,
     error: unknown,
+    progress?: SlackProgressReporter,
   ): Promise<void> {
     const correlationId = crypto.randomUUID();
     this.#logger.error("slack_message_failed", {
@@ -420,7 +501,9 @@ export class SlackBridge {
       correlationId,
       error,
     });
-    if (workingTs) {
+    if (workingTs && progress) {
+      await progress.fail(correlationId);
+    } else if (workingTs) {
       await client.chat
         .update({
           channel: message.channelId,
@@ -460,17 +543,23 @@ export class SlackBridge {
     workingTs: string | undefined,
     delegatedRequest: IncomingDelegationRequest | undefined,
     texts: string[],
+    consoleDelivery = false,
   ): Promise<DeliveryResult> {
     let posted = 0;
     try {
       for (const text of texts) {
-        await client.chat.postMessage({
+        const payload = {
           unfurl_links: false,
           unfurl_media: false,
           channel: message.channelId,
           thread_ts: message.threadTs ?? message.ts,
           text,
-        });
+        };
+        if (consoleDelivery) {
+          await this.#deliveryQueue.send("post", () => this.#progressClient.chat.postMessage(payload));
+        } else {
+          await client.chat.postMessage(payload);
+        }
         posted += 1;
       }
       return { posted, total: texts.length };

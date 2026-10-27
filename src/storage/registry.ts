@@ -139,6 +139,16 @@ export class Registry {
         processed_at TEXT NOT NULL
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS slack_threads (
+        team_id TEXT NOT NULL,
+        app_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        thread_ts TEXT NOT NULL,
+        engaged INTEGER NOT NULL DEFAULT 0 CHECK (engaged IN (0, 1)),
+        context_ts TEXT,
+        PRIMARY KEY (team_id, app_id, channel_id, thread_ts)
+      ) STRICT;
+
       CREATE INDEX IF NOT EXISTS processed_events_processed_at
         ON processed_events (processed_at);
 
@@ -296,6 +306,44 @@ export class Registry {
          FROM pi_sessions WHERE session_key = ?`,
     ).get(sessionKey) as PiSessionRow | undefined;
     return row ? toSessionRecord(row) : undefined;
+  }
+
+  /** Old worker channel conversations could only originate from an invocation. */
+  backfillWorkerThreads(): void {
+    this.#database.exec(`
+      INSERT OR IGNORE INTO slack_threads (team_id, app_id, channel_id, thread_ts, engaged)
+      SELECT team_id, app_id, channel_id, thread_ts, 1 FROM conversations
+       WHERE channel_id GLOB '[CG]*'
+    `);
+  }
+
+  threadState(key: ConversationKey): { engaged: boolean; contextTs?: string } {
+    const row = this.#statement(`
+      SELECT engaged, context_ts FROM slack_threads
+       WHERE team_id = ? AND app_id = ? AND channel_id = ? AND thread_ts = ?
+    `).get(key.teamId, key.appId, key.channelId, key.threadTs) as
+      { engaged: number; context_ts: string | null } | undefined;
+    return {
+      engaged: row?.engaged === 1,
+      ...(row?.context_ts ? { contextTs: row.context_ts } : {}),
+    };
+  }
+
+  engageThread(key: ConversationKey): void {
+    this.#statement(`
+      INSERT INTO slack_threads (team_id, app_id, channel_id, thread_ts, engaged)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT(team_id, app_id, channel_id, thread_ts) DO UPDATE SET engaged = 1
+    `).run(key.teamId, key.appId, key.channelId, key.threadTs);
+  }
+
+  advanceThreadContext(key: ConversationKey, throughTs: string): void {
+    this.#statement(`
+      INSERT INTO slack_threads (team_id, app_id, channel_id, thread_ts, context_ts)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(team_id, app_id, channel_id, thread_ts) DO UPDATE SET context_ts = excluded.context_ts
+       WHERE context_ts IS NULL OR CAST(context_ts AS REAL) < CAST(excluded.context_ts AS REAL)
+    `).run(key.teamId, key.appId, key.channelId, key.threadTs, throughTs);
   }
 
   createConversation(

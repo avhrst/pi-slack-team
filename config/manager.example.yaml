@@ -11,7 +11,7 @@ slack:
   # Ambient observations remain restricted to explicitly authorized humans.
   allowedUserIds:
     - U0000000000
-  progressMode: summary
+  progressMode: console
   fileUploads: false
   maxFileBytes: 20971520
   maxFilesPerMessage: 5

@@ -30,11 +30,8 @@ function dialogTimeout(request: Record<string, unknown>): number {
   return Math.min(MAX_DIALOG_TIMEOUT_MS, Math.max(MIN_DIALOG_TIMEOUT_MS, requested - 1_000));
 }
 
-function responseInstruction(channelId: string, response: string): string {
-  const instruction = `Reply in this thread with ${response}.`;
-  return channelId.startsWith("D")
-    ? instruction
-    : `${instruction} Channel replies must explicitly @mention this agent.`;
+function responseInstruction(_channelId: string, response: string): string {
+  return `Reply in this thread with ${response}. No @mention is needed.`;
 }
 
 function requestText(

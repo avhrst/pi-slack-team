@@ -46,7 +46,7 @@ describe("agent config", () => {
   it("applies safe runtime defaults", () => {
     const config = validConfig();
     expect(config.role).toBe("worker");
-    expect(config.slack.progressMode).toBe("summary");
+    expect(config.slack.progressMode).toBe("console");
     expect(config.slack.fileUploads).toBe(false);
     expect(config.slack.maxFileBytes).toBe(20 * 1_024 * 1_024);
     expect(config.slack.maxFilesPerMessage).toBe(5);
@@ -290,4 +290,17 @@ describe("agent config", () => {
     };
     expect(() => loadSlackCredentials(config)).toThrow();
   });
+});
+
+
+it("accepts an explicit resumed-session model and rejects unknown thinking levels", () => {
+  const input = validConfig();
+  const configured = agentConfigSchema.parse({ ...input, pi: {
+    ...input.pi, provider: "openai-codex", model: "gpt-6.1-sol", thinkingLevel: "high",
+  } });
+  expect(configured.pi.model).toBe("gpt-6.1-sol");
+  expect(configured.pi.thinkingLevel).toBe("high");
+  expect(() => agentConfigSchema.parse({ ...configured, pi: {
+    ...configured.pi, thinkingLevel: "unsupported",
+  } })).toThrow();
 });

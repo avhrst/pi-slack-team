@@ -48,11 +48,13 @@ export const readySchema = z.object({
   agentId: agentIdSchema, instanceId: idSchema,
   sessionFile: z.string().startsWith("/"), sessionId: z.string().min(1),
   updatedAt: z.number(), busy: z.boolean(),
+  provider: z.string().optional(), model: z.string().optional(), thinkingLevel: z.string().optional(),
 });
 export type Ready = z.infer<typeof readySchema>;
 export const runResultSchema = z.object({
   id: idSchema, ok: z.boolean(), text: z.string().max(200_000),
   sessionFile: z.string(), sessionId: z.string(),
+  finalEventSequence: z.number().int().nonnegative().optional(),
 });
 export type RunResult = z.infer<typeof runResultSchema>;
 

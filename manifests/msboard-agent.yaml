@@ -32,6 +32,7 @@ oauth_config:
       - assistant:write
       - channels:history
       - chat:write
+      - files:read
       - groups:history
       - im:history
 
@@ -40,6 +41,8 @@ settings:
     bot_events:
       - app_home_opened
       - app_mention
+      - message.channels
+      - message.groups
       - message.im
   interactivity:
     is_enabled: false

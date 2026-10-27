@@ -21,6 +21,7 @@ import {
 import { RpcClient, type RpcRecord } from "./rpc-client.js";
 import { EMPTY_TURN_TEXT } from "./turn-text.js";
 import type { RpcClientOptions } from "./rpc-client.js";
+import { PUBLIC_PROGRESS_GUIDANCE } from "./activity-progress.js";
 
 export interface PiTurnResult {
   text: string;
@@ -113,6 +114,7 @@ export class PiSessionPool {
     text: string,
     onEvent?: (event: RpcRecord) => void,
     allowExistingOwner = false,
+    sourceUserId = ownerUserId,
   ): Promise<PiTurnResult> {
     const serializedConversation = serializeConversationKey(key);
     const requestedSession = piSessionKey(key, ownerUserId);
@@ -155,7 +157,7 @@ export class PiSessionPool {
           }
           onEvent?.(event);
           if (event.type === "extension_ui_request") {
-            void this.#handleUiRequest(conversation, handle.client, event);
+            void this.#handleUiRequest({ ...conversation, ownerUserId: sourceUserId }, handle.client, event);
           }
         };
         handle.client.on("event", eventListener);
@@ -239,6 +241,7 @@ export class PiSessionPool {
       agentDir: this.#config.pi.agentDir,
       sessionDir: this.#config.pi.sessionDir,
       requestTimeoutMs: this.#config.pi.requestTimeoutMs,
+      ...(["balanced", "informative"].includes(this.#config.slack.progressMode) ? { appendSystemPrompt: PUBLIC_PROGRESS_GUIDANCE } : {}),
       ...(interAgentEnvironment
         ? {
             extensionPaths: [INTER_AGENT_EXTENSION_PATH],

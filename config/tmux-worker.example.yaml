@@ -8,7 +8,7 @@ slack:
   teamId: T0000000000
   appId: A0000000000
   allowedUserIds: [U0000000000]
-  progressMode: summary
+  progressMode: console
 pi:
   transport: tmux
   tmuxCommand: /usr/local/bin/tmux

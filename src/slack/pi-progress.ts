@@ -1,5 +1,7 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
 import { decodeSlackEntities, escapeSlackText } from "./mrkdwn.js";
+import { ActivityProgress, compactProgressText } from "../pi/activity-progress.js";
+import { InformativeProgress } from "./informative-progress.js";
 
 // Slack recommends keeping top-level message text below 4,000 characters.
 // Final answers are chunked separately; progress updates favor reliability.
@@ -8,8 +10,8 @@ const MAX_TOOL_SECTION_CHARS = 1_200;
 const MAX_ENTRIES = 100;
 const DEPLOY_STORE_RE = /^[A-Z0-9_]{1,32}$/u;
 
-export type ProgressMode = "summary" | "raw";
-export type ProgressState = "working" | "completed" | "delivery-failed";
+export type ProgressMode = "console" | "summary" | "balanced" | "informative" | "raw";
+export type ProgressState = "working" | "completed" | "delivery-failed" | "failed";
 
 /** Pi completed, but Slack rejected `posted + 1` of `total` response parts. */
 export interface DeliveryFailure {
@@ -110,7 +112,20 @@ function safeInteger(value: unknown): number | undefined {
     : undefined;
 }
 
-function deploymentProgress(value: unknown): string | undefined {
+export interface DeploymentSnapshot {
+  stage: "apex" | "sql-files";
+  state: "running" | "completed";
+  planned: number;
+  completed: number;
+  pending: number;
+  ok: number;
+  warn: number;
+  fail: number;
+  skip: number;
+  current?: string;
+}
+
+function deploymentSnapshot(value: unknown): DeploymentSnapshot | undefined {
   const text = resultText(value);
   const markers = [...text.matchAll(/PI_DEPLOY_PROGRESS (\{[^\r\n]{1,1200}\})/gu)];
   const encoded = markers.at(-1)?.[1];
@@ -152,6 +167,15 @@ function deploymentProgress(value: unknown): string | undefined {
     return undefined;
   }
 
+  return { stage: stage as DeploymentSnapshot["stage"], state: state as DeploymentSnapshot["state"],
+    planned, completed, pending, ok, warn, fail, skip,
+    ...(typeof current === "string" ? { current } : {}) };
+}
+
+function deploymentProgress(value: unknown): string | undefined {
+  const snapshot = deploymentSnapshot(value);
+  if (!snapshot) return undefined;
+  const { stage, state, completed, planned, ok, warn, fail, skip, current } = snapshot;
   const label = stage === "apex" ? "APEX" : "SQL file";
   const icon = state === "completed" ? ":white_check_mark:" : ":rocket:";
   const currentText = typeof current === "string" ? ` • current ${inlineCode(current)}` : "";
@@ -235,6 +259,8 @@ export function toSlackMrkdwn(text: string): string {
 export class PiProgressTranscript {
   readonly #mode: ProgressMode;
   readonly #entries: ProgressEntry[] = [];
+  readonly #activity = new ActivityProgress();
+  readonly #informative = new InformativeProgress();
   readonly #tools = new Map<string, ToolStats>();
   readonly #toolCalls = new Map<string, string>();
   readonly #rawTools = new Map<string, RawToolEntry>();
@@ -248,20 +274,55 @@ export class PiProgressTranscript {
   }
 
   record(event: RpcRecord): boolean {
-    // The first start replaces the "queued" placeholder even when the turn
-    // streams no text or tools (tmux forwards neither text deltas nor thinking).
+    if (this.#mode === "informative") {
+      const status = event.type === "tool_execution_update" ? deploymentSnapshot(event.partialResult)
+        : event.type === "tool_execution_end" ? deploymentSnapshot(event.result) : undefined;
+      return this.#informative.record(event, status);
+    }
+    if (this.#mode === "balanced") {
+      const changed = this.#activity.record(event);
+      const status = event.type === "tool_execution_update" ? deploymentProgress(event.partialResult)
+        : event.type === "tool_execution_end" ? deploymentProgress(event.result) : undefined;
+      if (status && status !== this.#deploymentStatus) {
+        this.#deploymentStatus = status;
+        return true;
+      }
+      return changed;
+    }
+    if (event.type === "agent_progress" && typeof event.text === "string") {
+      this.#appendStatus(toSlackMrkdwn(compactProgressText(event.text)));
+      return true;
+    }
+    // Even a silent turn must replace the queued placeholder.
     if (event.type === "agent_start") {
       if (this.#started) return false;
       this.#started = true;
       return true;
     }
-
     if (event.type === "message_update") {
       const update = asRecord(event.assistantMessageEvent);
+      if (update?.type === "text_snapshot" && typeof update.text === "string") {
+        return this.#replaceText(update.text);
+      }
       if (update?.type !== "text_delta" || typeof update.delta !== "string") {
         return false;
       }
       return this.#appendText(update.delta);
+    }
+
+    if (event.type === "message_start") {
+      this.#textBoundary = true;
+      return false;
+    }
+
+    if (event.type === "message_end" && asRecord(event.message)?.role === "assistant") {
+      const content = asRecord(event.message)?.content;
+      if (!Array.isArray(content)) return false;
+      const text = content.map(asRecord).filter((part) => part?.type === "text")
+        .map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
+      const changed = text ? this.#replaceText(text) : false;
+      this.#textBoundary = true;
+      return changed;
     }
 
     if (event.type === "tool_execution_start") {
@@ -334,11 +395,11 @@ export class PiProgressTranscript {
     return false;
   }
 
-  /**
-   * Final states are a receipt: the answer is posted separately, so streamed
-   * text is dropped and only status, deployment and tool lines remain.
-   */
-  render(state: ProgressState, failure?: DeliveryFailure): string {
+  /** Final states are receipts, never a duplicate of the separately posted answer. */
+  render(state: ProgressState, detail?: DeliveryFailure | string): string {
+    if (this.#mode === "informative") return this.#informative.render(state, detail);
+    if (this.#mode === "balanced") return this.#renderBalanced(state, detail);
+    const failure = typeof detail === "object" ? detail : undefined;
     const final = state !== "working";
     const toolCalls = this.#mode === "summary" ? this.#toolSummary(state) : "";
     const title =
@@ -346,6 +407,7 @@ export class PiProgressTranscript {
         ? ":hourglass_flowing_sand: *Pi is working…*"
         : state === "delivery-failed" && failure
           ? `:warning: Pi completed, but Slack rejected part ${failure.posted + 1} of ${failure.total}`
+          : state === "failed" ? ":warning: *Pi could not complete this request*"
           : ":white_check_mark: *Pi completed*";
     const heading = final && toolCalls ? `${title} · ${toolCalls}` : title;
 
@@ -373,6 +435,25 @@ export class PiProgressTranscript {
         ? body
         : `…\n${body.slice(-(available - 2))}`;
     return `${heading}\n\n${bounded}`;
+  }
+
+  #renderBalanced(state: ProgressState, detail?: DeliveryFailure | string): string {
+    const activity = this.#activity.snapshot();
+    const plain = escapeSlackText;
+    const reference = typeof detail === "string" ? detail : detail?.correlationId;
+    const sections = [state === "delivery-failed" && typeof detail === "object"
+      ? `:warning: Pi завершив роботу, але Slack не прийняв частину ${detail.posted + 1} з ${detail.total} відповіді. Не повторюйте дії без перевірки результату.`
+      : state === "completed" ? ":white_check_mark: *Роботу над запитом завершено*"
+      : state === "failed" ? ":warning: *Не вдалося завершити запит*"
+      : ":hourglass_flowing_sand: *Працюю над запитом*"];
+    if (activity.notes.length) sections.push(`*Хід роботи*\n${activity.notes.map((note) => `• ${plain(note)}`).join("\n")}`);
+    if (state === "working") sections.push(`*Зараз:* ${plain(activity.current)}`);
+    if (activity.workers.length) sections.push(`*Агенти*\n${activity.workers.map((worker) => `• *${worker.id}:* ${plain(compactProgressText(worker.text, 260))}`).join("\n")}`);
+    if (this.#deploymentStatus) sections.push(this.#deploymentStatus);
+    if (activity.failures) sections.push(`:warning: Невдалих робочих кроків: ${activity.failures}. Це не обов’язково означає невдачу всього завдання; подробиці — у підсумку.`);
+    if (["failed", "delivery-failed"].includes(state) && reference && /^[a-zA-Z0-9-]{1,100}$/u.test(reference)) sections.push(`Код звернення: ${reference}`);
+    const text = sections.join("\n\n");
+    return text.length <= MAX_TRANSCRIPT_CHARS ? text : `${text.slice(0, MAX_TRANSCRIPT_CHARS - 1)}…`;
   }
 
   #renderEntry(entry: ProgressEntry): string {
@@ -461,6 +542,16 @@ export class PiProgressTranscript {
     this.#textBoundary = false;
     this.#trimEntries();
     return true;
+  }
+
+  #replaceText(text: string): boolean {
+    const last = this.#entries.at(-1);
+    if (last?.kind === "text" && !this.#textBoundary) {
+      if (last.value === text) return false;
+      last.value = text;
+      return true;
+    }
+    return this.#appendText(text);
   }
 
   #appendStatus(value: string): void {

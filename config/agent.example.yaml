@@ -10,8 +10,8 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  # summary hides tool arguments/output; raw exposes them in the Slack conversation.
-  progressMode: summary
+  # console preserves Pi text and compact tool previews; summary hides tool details.
+  progressMode: console
 
 interAgent:
   peers:

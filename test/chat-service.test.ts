@@ -159,6 +159,7 @@ describe("ChatService", () => {
       "this regression needs a ticket",
       undefined,
       true,
+      "U01",
     );
     registry.close();
   });
@@ -207,6 +208,7 @@ describe("ChatService", () => {
       delegated.text,
       undefined,
       true,
+      "UMANAGER",
     );
 
     await expect(
@@ -251,6 +253,7 @@ describe("ChatService", () => {
       "continue directly",
       undefined,
       true,
+      "U01",
     );
 
     const delegated = message({
@@ -276,6 +279,7 @@ describe("ChatService", () => {
       delegated.text,
       undefined,
       true,
+      "UMANAGER",
     );
 
     await expect(
@@ -297,6 +301,7 @@ describe("ChatService", () => {
       "hello",
       undefined,
       true,
+      "U02",
     );
     expect(registry.getConversation(key)?.ownerUserId).toBe("U01");
     registry.close();
@@ -333,6 +338,7 @@ describe("ChatService", () => {
       "hello",
       undefined,
       true,
+      "U02",
     );
     registry.close();
   });
@@ -392,6 +398,7 @@ describe("ChatService", () => {
       "continue the shared work",
       undefined,
       true,
+      "U02",
     );
     expect(registry.getConversation(threadKey)?.ownerUserId).toBe("U01");
     registry.close();
@@ -415,6 +422,7 @@ describe("ChatService", () => {
       "help in this channel",
       undefined,
       true,
+      "U01",
     );
     registry.close();
   });

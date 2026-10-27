@@ -27,7 +27,8 @@ The rest of this README describes the legacy **`pi.transport: rpc`** backend unl
 - Opt-in, correlated manager-to-worker delegation in a shared Slack thread.
 - Exact Slack workspace, app, human-user, and inter-agent peer authorization.
 - One persistent Pi JSONL session per Slack DM/thread.
-- Bounded untrusted Slack thread history for new sessions.
+- Persistent thread engagement and incremental, bounded untrusted Slack context.
+- Pi-style console output with retained commentary and compact tool results.
 - Event deduplication and per-thread serial execution.
 - Global concurrency limit and idle Pi-process hibernation.
 - Slack rendering for progress, final output, and Pi UI requests.
@@ -49,14 +50,15 @@ role: worker # or manager
 | --- | :---: | :---: |
 | Authorized direct messages | Yes | Yes |
 | Explicit channel `@mention` | Yes | Yes |
-| Ordinary authorized human messages in joined channels | No | Yes |
+| Replies from allowed humans in an engaged thread, without another mention | Yes | Yes |
+| Other authorized human messages in joined channels | No | Yes |
 | Ordinary bot-authored or unauthorized messages | Ignored | Ignored |
 | Authenticated inter-agent request/response envelope | Accepted from configured managers | Accepted from configured workers |
 | Ambient turn may remain completely silent | N/A | Yes |
 
 ### Worker
 
-A worker is an on-demand specialist. It receives authorized DMs and explicit `@agent` mentions. Ordinary channel conversation cannot allocate a Pi session or invoke tools.
+A worker is an on-demand specialist. It receives authorized DMs and explicit `@agent` mentions. The first mention (or trusted delegation) engages the agent in that thread; subsequent replies from allowed humans need no mention. Other channel conversations cannot allocate a Pi session or invoke tools. Engagement survives restarts. Existing worker channel conversations are engaged on upgrade; legacy manager conversations need a new mention because old state does not distinguish observations from invocations.
 
 Use [the public worker manifest](manifests/worker-agent.example.yaml) and [the worker config example](config/worker.example.yaml).
 
@@ -68,7 +70,7 @@ A manager receives the worker events plus authorized human messages in every pub
 - ask one material clarification in the Slack thread;
 - remain silent.
 
-Ambient manager turns never publish `Working…` or tool progress. This avoids flooding channels when no intervention is useful.
+Replies in an engaged manager thread are ordinary requests with console output. Other ambient manager turns never publish `Working…` or tool progress. This avoids flooding channels when no intervention is useful.
 
 The runtime itself is not Jira-specific. A manager can create Jira work only when its Pi account has Jira tools and its agent instructions authorize that behavior. Good manager instructions should require duplicate search, a clear project/scope, and no sensitive data in tickets.
 
@@ -98,7 +100,7 @@ pi-slack-team runtime (one Unix account)
 
 A runtime owns exactly one Slack app connection and runs as exactly one Unix user. Pi inherits only that user's working directory, agent instructions, tools, credentials, sessions, and OS permissions.
 
-Slack conversations retain the durable key `(team_id, app_id, channel_id, thread_ts)`, while Pi sessions have an explicit scope. DMs use `(team_id, app_id, user_id)`, giving each human one isolated session per agent across top-level DM messages. Channel conversations use `(team_id, app_id, channel_id, thread_ts)`, keeping every channel thread isolated. New sessions receive a bounded snapshot of prior thread messages marked as untrusted user context. Resumed sessions continue from Pi's JSONL session file.
+Slack conversations retain the durable key `(team_id, app_id, channel_id, thread_ts)`, while Pi sessions have an explicit scope. DMs use `(team_id, app_id, user_id)`, giving each human one isolated session per agent across top-level DM messages. Channel conversations use `(team_id, app_id, channel_id, thread_ts)`, keeping every channel thread isolated. New sessions receive a bounded snapshot of prior thread messages marked as untrusted user context. Later thread turns fetch context after the last successfully incorporated timestamp, excluding the current request and the agent's own output (up to 200 messages / 50,000 characters). Resumed sessions continue from Pi's JSONL session file. Preparation, execution and final delivery share a serial lane; dialog replies bypass that lane and belong to the current requester.
 
 Read [Architecture](docs/architecture.md) for process, identity, ownership, and storage details.
 
@@ -132,7 +134,7 @@ Choose exactly one public manifest:
 
 Import it through **Create New App → From an app manifest**, enable Socket Mode, create an app-level token with `connections:write`, and install the app to obtain its bot token.
 
-Manager delivery requires both `message.channels` and `message.groups`. A working `@mention` proves only the `app_mention` subscription; always canary-test an ordinary message without a mention.
+Thread continuation and manager observation require both `message.channels` and `message.groups`. A working `@mention` proves only the `app_mention` subscription; always canary-test an ordinary message without a mention.
 
 Follow [Slack app setup](docs/slack-setup.md) for scopes, IDs, channel invitations, credential handling, and troubleshooting.
 
@@ -162,7 +164,7 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: summary
+  progressMode: console
 
 pi:
   command: /usr/bin/pi
@@ -233,15 +235,45 @@ The schema is strict: unknown keys and invalid IDs fail startup.
 | `teamId` | Yes | — | Exact Slack workspace ID |
 | `appId` | Yes | — | Exact Slack app ID |
 | `allowedUserIds` | Yes | — | Non-empty authorized human allowlist |
-| `progressMode` | No | `summary` | `summary` hides tool arguments/output; `raw` exposes them |
+| `progressMode` | No | `console` | Ordered Pi text and compact tool previews; explicit `summary` / `balanced` / `informative` / `raw` retain legacy rendering |
 | `fileUploads` | No | `false` | Permit authorized attachment downloads |
 | `maxFileBytes` | No | 20 MiB | Per-file download limit, maximum 100 MiB |
 | `maxFilesPerMessage` | No | `5` | Attachment count limit, maximum 10 |
 | `uploadRetentionDays` | No | `7` | Delete downloaded attachments older than this; 1–365 |
 
-Use `progressMode: raw` only when everyone who can see the Slack thread may see tool arguments and output. Private model thinking is never sent to Slack. Model text is escaped before it reaches Slack, so `<!channel>`, mentions, and `Promise<string>` display literally instead of pinging or disappearing. Progress updates are capped below Slack's recommended 4,000-character message size. If Slack rejects a detailed raw update, that turn immediately retries with compact summary progress and remains in summary mode; the final answer is still posted separately.
+The default `progressMode: console` retains each assistant message and tool call in order. A running element is updated in place; the final answer is reconciled without a duplicate post. Tool cards show a command/path, state and the first 10 output lines, with an explicit hidden-line count. Terminal controls are removed and long assistant messages are split without corrupting code fences. Both RPC and tmux deliver the visible stream. Slack writes share a throttled queue and honor the complete `Retry-After`.
 
-In `summary` mode, partial tool output remains hidden. The bridge recognizes only strict `PI_DEPLOY_PROGRESS` JSON markers (`apex`/`sql-files`, bounded integer counts, and an uppercase TT identifier) and renders those validated fields as a live deployment status. Invalid markers and all surrounding output are ignored.
+`console` and `raw` can expose tool arguments and output to everyone who can read the thread; use `summary` when tool details should remain hidden. Existing explicit legacy-mode configurations keep their previous behavior: change them to `console` to adopt the new stream.
+
+Legacy `progressMode: balanced` retains compact public milestones, current activity and worker updates while hiding technical payloads.
+
+Use **`progressMode: informative`** for deployment work: enough detail to follow the job without a terminal transcript. It shows up to three recent public milestones, current activity, worker statuses, grouped counts of completed/running/failed work steps, and validated deployment counters (completed/planned, remaining, OK/WARN/FAIL/SKIP, current TT). Work-step counts are explicitly separate from TT results. Only canonical Oracle/PLS/SQLcl/TNS error codes at command-output line starts are extracted; commands, arguments, SQL, traces, arbitrary stdout, thinking, and streaming final-answer text are never included. Observed codes are not automatically treated as the root cause. An ended process with pending operations, failed/warned operations, or skipped targets is never rendered as clean deployment success.
+
+Informative updates coalesce every five seconds and identical views are suppressed. Final receipts bypass normal batching but honor Slack's full Retry-After; shutdown cancels a pending cooldown. It uses the same single edited progress message; the final answer remains a separate message. Public prose redacts credential assignments/Oracle connection strings, hides code blocks and complex inline commands, and escapes Slack broadcast markup. The ledger is bounded at 3,500 characters, with blockers/counters taking priority. If Slack rejects it, the turn falls back to safe `balanced` prose, **not** unfiltered text deltas. The default is `console`; opt in to this legacy presentation per agent:
+
+```yaml
+slack:
+  progressMode: informative
+```
+
+Example during a rollout:
+
+```text
+Хід виконання
+Розгортання SQL: 12/51 операцій • залишилось 39
+OK 12 • WARN 0 • FAIL 0 • SKIP 0
+Поточна ТТ: VINMAG
+Зараз: Виконую робочий крок
+Що встановлено / наступний крок
+• Файл перевірено; оновлюю лише підтверджені активні ТТ.
+Робочі кроки (не результати ТТ)
+• Перегляд матеріалів: завершено 3
+• Командні кроки: завершено 1, виконується 1
+```
+
+Use `progressMode: raw` only when everyone who can see the Slack thread may see tool arguments and output. Private model thinking is never sent to Slack. Model text is escaped before it reaches Slack, so `<!channel>`, mentions, and `Promise<string>` display literally instead of pinging or disappearing. Progress updates are capped below Slack's recommended 4,000-character message size. If Slack rejects a balanced or raw payload, that turn retries with compact summary progress; informative uses the privacy-preserving balanced fallback instead. Rate limits, timeouts and network failures do not downgrade the mode. The final answer is posted first, then progress is settled as a receipt; partial delivery is explicitly reported without replaying tools.
+
+In `summary`, `balanced`, and `informative` modes, partial tool output remains hidden (informative additionally extracts only whitelisted error codes). The bridge recognizes only strict `PI_DEPLOY_PROGRESS` JSON markers (`apex`/`sql-files`, bounded integer counts, and an uppercase TT identifier) and renders those validated fields as a live deployment status. Invalid markers and all surrounding output are ignored.
 
 ### `pi`
 
@@ -296,7 +328,7 @@ The public examples are generic and contain no IDs or tokens:
 
 | Manifest | Channel events | Recommended use |
 | --- | --- | --- |
-| [Worker](manifests/worker-agent.example.yaml) | Explicit `app_mention` only | Sensitive/on-demand specialist |
+| [Worker](manifests/worker-agent.example.yaml) | `app_mention`, `message.channels`, `message.groups`; replies accepted only in engaged threads | On-demand specialist |
 | [Manager](manifests/manager-agent.example.yaml) | `app_mention`, `message.channels`, `message.groups` | Coordinator/project manager |
 
 Both include history scopes because new channel sessions bootstrap bounded thread context. Add `files:read` only when `slack.fileUploads: true`.
@@ -333,7 +365,7 @@ See [Operations](docs/operations.md) for onboarding, rollout, and failure handli
 2. The runtime validates workspace, receiving app, conversation type, sender, bot status, subtype, and file limits. Inter-agent envelopes additionally require an exact configured sender app and bot user.
 3. The event ID is claimed in SQLite; retries become no-ops.
 4. The Slack conversation is mapped to its direct-user or channel-thread Pi session.
-5. A new logical Pi session receives bounded prior thread context.
+5. The serialized turn receives fresh bounded thread context; a new logical Pi session bootstraps prior history.
 6. A Pi RPC subprocess starts or resumes and runs under the configured Unix account.
 7. Explicit requests receive throttled progress updates; ambient manager observations do not.
 8. Final text is rendered to Slack, or a manager's silent decision produces no message.

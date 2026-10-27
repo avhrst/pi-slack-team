@@ -23,6 +23,28 @@ function message(overrides: Partial<IncomingSlackMessage> = {}): IncomingSlackMe
 }
 
 describe("addSlackThreadContext", () => {
+  it("fetches only fresh context, excluding the current request and this agent's output", async () => {
+    const fetchReplies = vi.fn(async () => ({ ok: true, messages: [
+      { ts: "100.000000", user: "U01", text: "already incorporated" },
+      { ts: "101.000000", user: "UBOT", text: "own console output" },
+      { ts: "102.000000", user: "U02", text: "new background" },
+      { ts: "103.000000", user: "U01", text: "current request" },
+      { ts: "104.000000", user: "U02", text: "future message" },
+    ] }));
+    const result = await addSlackThreadContext(message(), "current request", fetchReplies, { afterTs: "100.000000", botUserId: "UBOT" });
+    expect(fetchReplies).toHaveBeenCalledWith(expect.objectContaining({ oldest: "100.000000", latest: "103.000000" }));
+    const context = result.split("<slack_thread_context_json>\n")[1]!.split("\n</slack_thread_context_json>")[0]!;
+    expect(JSON.parse(context).messages).toHaveLength(1);
+    expect(context).toContain("new background");
+    expect(JSON.stringify(JSON.parse(context).messages)).not.toMatch(/already incorporated|own console output|current request|future message/u);
+    expect(result.endsWith("Current authorized Slack request:\ncurrent request")).toBe(true);
+  });
+
+  it("skips fetching an already incorporated delayed event", async () => {
+    const fetchReplies = vi.fn();
+    await expect(addSlackThreadContext(message(), "delayed", fetchReplies, { afterTs: "104.000000" })).resolves.toBe("delayed");
+    expect(fetchReplies).not.toHaveBeenCalled();
+  });
   it("adds the root title and complete prior thread history", async () => {
     const fetchReplies = vi.fn(async () => ({
       ok: true,

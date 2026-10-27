@@ -189,6 +189,30 @@ afterEach(() => {
 });
 
 describe("PiSessionPool", () => {
+  it("binds RPC dialogs to the current authorized participant rather than the session owner", async () => {
+    const { config, registry, logger } = setup();
+    const ui = vi.fn(async () => ({ confirmed: true }));
+    const pool = new PiSessionPool(config, registry, logger, ui, (options) => {
+      const client = new FakeClient(options);
+      const request = client.request.bind(client);
+      vi.spyOn(client, "request").mockImplementation(async (command) => {
+        if (command.type === "prompt") client.emit("event", { type: "extension_ui_request", id: "confirm", method: "confirm", title: "Continue?" });
+        return request(command);
+      });
+      return client;
+    });
+    try {
+      const thread = { ...key, channelId: "C01" };
+      await pool.prompt(thread, "U01", "first");
+      await pool.prompt(thread, "U01", "second", undefined, true, "U02");
+      expect(ui).toHaveBeenLastCalledWith(expect.objectContaining({ conversation: expect.objectContaining({ ownerUserId: "U02" }) }));
+      expect(registry.getConversation(thread)?.ownerUserId).toBe("U01");
+    } finally {
+      await pool.shutdown();
+      registry.close();
+    }
+  });
+
   it.each(["error", "aborted"])("rejects a final %s outcome and allows the next turn to resume", async (stopReason) => {
     const { config, registry, logger } = setup();
     const clients: AssistantOutcomeClient[] = [];

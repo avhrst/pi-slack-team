@@ -162,7 +162,7 @@ describe("SlackUiBroker", () => {
     expect(broker.consume(message("yes"))).toEqual({ handled: false });
   });
 
-  it("requires an explicit agent mention for channel replies", async () => {
+  it("accepts channel dialog replies without another agent mention", async () => {
     const broker = new SlackUiBroker();
     const post = vi.fn(async () => undefined);
     const pending = broker.request(
@@ -185,7 +185,7 @@ describe("SlackUiBroker", () => {
 
     expect(post).toHaveBeenCalledWith(
       expect.stringContaining(
-        "Channel replies must explicitly @mention this agent",
+        "No @mention is needed.",
       ),
     );
     broker.cancelAll();
