@@ -338,6 +338,26 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     expect(agent.calls[1]).toContain("NOT local/TUI");
   }, 20_000);
 
+  it("publishes completion only after cleanup so an immediate duplicate cannot be deleted", async () => {
+    const cfg = config(); const agent = await fakeAgent(cfg);
+    const request: RunRequest = { id: crypto.randomUUID(), text: "task", origin: { kind: "local" }, createdAt: Date.now(), expiresAt: Date.now() + 30_000 };
+    const original = TmuxMailbox.prototype.remove;
+    let reached = false; let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(TmuxMailbox.prototype, "remove").mockImplementation(async function (this: TmuxMailbox, name: string) {
+      if (name === bufferName("run", request.id)) { reached = true; await blocked; }
+      await original.call(this, name);
+    });
+    await agent.mailbox.put(bufferName("run", request.id), request);
+    try {
+      await until(async () => reached);
+      expect(await agent.mailbox.list("pst-done-")).toHaveLength(0);
+    } finally { release(); }
+    await until(async () => (await agent.mailbox.list()).includes(bufferName("done", request.id)));
+    expect(await agent.mailbox.list("pst-run-")).toHaveLength(0);
+    expect(agent.calls).toHaveLength(1);
+  });
+
   it("does not replay a completed/interrupted request and rejects cancelled queued work", async () => {
     const cfg = config();
     const agent = await fakeAgent(cfg, async () => "safe-result");

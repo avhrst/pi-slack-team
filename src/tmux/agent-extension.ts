@@ -68,9 +68,11 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
     // Write receipt before publishing: an interrupted/retried delivery never reruns tools.
     fs.writeFileSync(path.join(receipts, `${request.id}.json`), JSON.stringify(result), { mode: 0o600 });
     if (isActive) await publishEvents(request);
-    await mailbox.put(bufferName("done", request.id), result);
+    // Publish completion last: a caller may resubmit this ID as soon as it
+    // sees done. Late cleanup must not delete that newly queued duplicate.
     await mailbox.remove(bufferName("run", request.id));
     await mailbox.remove(bufferName("cancel", request.id));
+    await mailbox.put(bufferName("done", request.id), result);
   };
 
   const finishActive = async (request: RunRequest, ok: boolean, text: string) => {
