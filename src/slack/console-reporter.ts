@@ -1,5 +1,5 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
-import { ConsoleTranscript } from "./console-transcript.js";
+import { ConsoleTranscript, type ConsoleSnapshot } from "./console-transcript.js";
 import { sleep, transientFailure } from "./progress-reporter.js";
 
 /** Shared by all console turns: bound message volume and honor workspace cooldowns. */
@@ -11,7 +11,7 @@ export class SlackDeliveryQueue {
 
   constructor(readonly intervalMs = 1_250) {}
 
-  send<T>(method: "post" | "update" | "delete", operation: () => Promise<T>, signal: AbortSignal = new AbortController().signal): Promise<T> {
+  send<T>(method: "post" | "update" | "delete", operation: () => Promise<T>, signal: AbortSignal = new AbortController().signal, safePost = false): Promise<T> {
     const combined = AbortSignal.any([signal, this.#stop.signal]);
     const result = this.#tail.then(async () => {
       for (let attempt = 1; ; attempt++) {
@@ -25,7 +25,7 @@ export class SlackDeliveryQueue {
         } catch (error) {
           const transient = transientFailure(error);
           if (transient) this.#cooldowns.set(method, Date.now() + transient.retryAfterMs);
-          if (!transient || attempt >= 3) throw error;
+          if (!transient || attempt >= 3 || (safePost && method === "post" && !definiteSlackRejection(error))) throw error;
         }
       }
     });
@@ -36,6 +36,18 @@ export class SlackDeliveryQueue {
   close(): void { this.#stop.abort(); }
 }
 
+/** A transport timeout/5xx may have committed the post. Only known rejections are safe to retry. */
+export function definiteSlackRejection(error: unknown): boolean {
+  const value = error as { code?: string; statusCode?: number };
+  return value?.code === "slack_webapi_platform_error" || value?.code === "slack_webapi_rate_limited_error" || value?.statusCode === 429;
+}
+
+export interface ConsoleReporterState {
+  transcript: ConsoleSnapshot;
+  posted: Array<[string, { ts: string; text: string }]>;
+  pending: string[];
+}
+
 export interface ConsoleDelivery {
   post(text: string): Promise<string>;
   update(ts: string, text: string): Promise<void>;
@@ -44,7 +56,7 @@ export interface ConsoleDelivery {
 
 /** Keep posted history; coalesce only edits to entries that are still changing. */
 export class SlackConsoleReporter {
-  readonly #transcript = new ConsoleTranscript();
+  readonly #transcript: ConsoleTranscript;
   readonly #posted = new Map<string, { ts: string; text: string }>();
   readonly #abort = new AbortController();
   #placeholder: string | undefined;
@@ -53,12 +65,22 @@ export class SlackConsoleReporter {
   #revision = 0;
   #accepting = true;
   #failure: unknown;
+  readonly #pending = new Set<string>();
 
   constructor(
     readonly queue: SlackDeliveryQueue,
     readonly delivery: ConsoleDelivery,
     readonly onError: (error: unknown) => void,
-  ) {}
+    readonly persistence?: { state?: ConsoleReporterState; save(state: ConsoleReporterState): void },
+  ) {
+    this.#transcript = new ConsoleTranscript(persistence?.state?.transcript);
+    for (const pair of persistence?.state?.posted ?? []) this.#posted.set(...pair);
+    for (const id of persistence?.state?.pending ?? []) this.#pending.add(id);
+  }
+
+  #save(): void {
+    this.persistence?.save({ transcript: this.#transcript.snapshot(), posted: [...this.#posted], pending: [...this.#pending] });
+  }
 
   async start(queued: boolean): Promise<void> {
     try {
@@ -71,6 +93,7 @@ export class SlackConsoleReporter {
   record(event: RpcRecord): void {
     if (!this.#accepting) return;
     this.#transcript.record(event);
+    this.#save();
     this.#revision++;
     if (!this.#timer && !this.#drain) {
       this.#timer = setTimeout(() => {
@@ -83,6 +106,7 @@ export class SlackConsoleReporter {
 
   async complete(text: string, omitFinal = false): Promise<void> {
     this.#transcript.complete(text, omitFinal);
+    this.#save();
     await this.#finish();
     if (omitFinal && this.#placeholder) {
       const ts = this.#placeholder;
@@ -93,6 +117,7 @@ export class SlackConsoleReporter {
 
   async fail(text: string): Promise<void> {
     this.#transcript.fail(text);
+    this.#save();
     await this.#finish();
   }
 
@@ -135,6 +160,7 @@ export class SlackConsoleReporter {
           if (this.#transcript.render().some((entry) => entry.id === id)) return;
           await this.delivery.remove(previous.ts);
           this.#posted.delete(id);
+          this.#save();
         }, this.#abort.signal);
       }
       // Re-read each entry inside the queue so stale partial results aren't posted.
@@ -147,11 +173,23 @@ export class SlackConsoleReporter {
           if (!latest) return;
           if (previous?.text === latest.text) return;
           const reuse = previous?.ts ?? this.#placeholder;
-          const ts = reuse ?? await this.delivery.post(latest.text);
+          let ts = reuse;
+          if (!ts) {
+            if (this.#pending.has(entry.id)) throw new Error("Uncertain Slack post; refusing to publish it again");
+            this.#pending.add(entry.id);
+            this.#save();
+            try { ts = await this.delivery.post(latest.text); }
+            catch (error) {
+              if (definiteSlackRejection(error)) { this.#pending.delete(entry.id); this.#save(); }
+              throw error;
+            }
+          }
           if (reuse) await this.delivery.update(reuse, latest.text);
           this.#placeholder = undefined;
           this.#posted.set(entry.id, { ts, text: latest.text });
-        }, this.#abort.signal);
+          this.#pending.delete(entry.id);
+          this.#save();
+        }, this.#abort.signal, Boolean(this.persistence));
       }
       this.#failure = undefined;
     } while (revision !== this.#revision && !this.#abort.signal.aborted);

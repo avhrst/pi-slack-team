@@ -1,7 +1,7 @@
 import type { AgentConfig } from "../config/schema.js";
 import type { Logger } from "../observability/logger.js";
 import { TmuxMailbox, bufferName, tmuxSocketPath } from "./mailbox.js";
-import { delegationSchema, peerResponseSchema, readySchema, workerRunId, type Delegation } from "./protocol.js";
+import { delegationOutputSchema, delegationSchema, peerResponseSchema, readySchema, workerRunId, type Delegation } from "./protocol.js";
 
 export function authorizeRelay(source: AgentConfig, target: AgentConfig, request: Delegation): boolean {
   return source.pi.transport === "tmux" && target.pi.transport === "tmux" &&
@@ -70,8 +70,8 @@ export class TmuxRelay {
           }
           const request = parsed.data;
           const target = this.#agents.get(request.to);
-          const respond = async (ok: boolean, text: string) => {
-            await sourceBox.put(bufferName("peer-result", request.id), { id: request.id, to: source.agentId, ok, text });
+          const respond = async (ok: boolean, text: string, finalOutputSequence?: number) => {
+            await sourceBox.put(bufferName("peer-result", request.id), { id: request.id, to: source.agentId, ok, text, ...(finalOutputSequence !== undefined ? { finalOutputSequence } : {}) });
             await sourceBox.remove(name);
           };
           if (!target || !authorizeRelay(source, target.config, request)) {
@@ -83,10 +83,15 @@ export class TmuxRelay {
           const inbox = bufferName("peer-in", peerId);
           const responseName = bufferName("out-response", peerId);
           const progressName = bufferName("out-progress", peerId);
+          const outputPrefix = `pst-out-events-${peerId}-`;
+          const ackName = bufferName("child-ack", request.id);
           const cleanup = async () => {
             await targetBox.remove(inbox);
             await targetBox.remove(responseName);
             await targetBox.remove(progressName);
+            for (const output of await targetBox.list(outputPrefix)) await targetBox.remove(output);
+            if (request.parentRunId) for (const output of await sourceBox.list(`pst-child-events-${request.parentRunId}-${request.id}-`)) await sourceBox.remove(output);
+            await sourceBox.remove(ackName);
           };
           if (Date.now() >= request.expiresAt) {
             await targetBox.put(bufferName("cancel", workerRunId(source.agentId, request.id)), { id: workerRunId(source.agentId, request.id) }).catch(() => undefined);
@@ -103,11 +108,29 @@ export class TmuxRelay {
             await respond(false, `Worker ${request.to} is offline or not ready; task was not replayed.`);
             continue;
           }
+          const acknowledgement = await sourceBox.readIfPresent(ackName) as { parentRunId?: string; throughSequence?: number } | undefined;
+          const acknowledged = acknowledgement?.parentRunId === request.parentRunId && Number.isSafeInteger(acknowledgement?.throughSequence)
+            ? acknowledgement!.throughSequence! : 0;
+          for (const output of targetNames.filter(name => name.startsWith(outputPrefix)).sort((a, b) => Number(a.slice(outputPrefix.length)) - Number(b.slice(outputPrefix.length)))) {
+            const packet = delegationOutputSchema.parse(await targetBox.read(output));
+            if (packet.id !== request.id || packet.from !== source.agentId || packet.workerId !== target.config.agentId ||
+                packet.parentRunId !== request.parentRunId || packet.toolCallId !== request.toolCallId ||
+                JSON.stringify(packet.origin) !== JSON.stringify(request.origin) ||
+                output !== `${outputPrefix}${packet.events[0]!.sequence}` ||
+                packet.events.some((item, index) => index > 0 && item.sequence <= packet.events[index - 1]!.sequence)) throw new Error("Invalid worker output packet");
+            if (packet.events.at(-1)!.sequence <= acknowledged) await targetBox.remove(output);
+            else {
+              const destination = `pst-child-events-${request.parentRunId}-${request.id}-${packet.events[0]!.sequence}`;
+              // Immutable until the source Node renderer acknowledges it.
+              if (!(await sourceBox.list(destination)).includes(destination)) await sourceBox.put(destination, packet, false);
+            }
+          }
           if (targetNames.includes(responseName)) {
             const response = peerResponseSchema.parse(await targetBox.read(responseName));
+            if ((response.finalOutputSequence ?? 0) > acknowledged) continue;
             if (response.id !== request.id || response.to !== source.agentId || response.text.length > source.interAgent!.maxResponseChars) {
               await respond(false, "Invalid or oversized worker response");
-            } else await respond(response.ok, response.text);
+            } else await respond(response.ok, response.text, response.finalOutputSequence);
             await cleanup();
             this.logger.info("tmux_relay_completed", { agentId: source.agentId, workerId: request.to, requestId: request.id });
           } else {

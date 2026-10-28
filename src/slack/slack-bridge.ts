@@ -40,6 +40,8 @@ import { toSlackMrkdwn, type DeliveryFailure } from "./pi-progress.js";
 import { SlackProgressReporter } from "./progress-reporter.js";
 import { SlackUiBroker } from "./slack-ui.js";
 import { addSlackThreadContext } from "./thread-context.js";
+import type { Registry } from "../storage/registry.js";
+import { SlackDelegationPublisher } from "./delegation-publisher.js";
 
 const SLACK_PROGRESS_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -50,6 +52,7 @@ interface DeliveryResult {
 }
 
 export class SlackBridge {
+  readonly delegations: SlackDelegationPublisher | undefined;
   readonly #config: AgentConfig;
   readonly #chatService: ChatService;
   readonly #interAgent: InterAgentGateway;
@@ -71,6 +74,7 @@ export class SlackBridge {
     interAgent: InterAgentGateway,
     logger: Logger,
     onConnectionFailure: (error: Error) => void,
+    registry?: Registry,
   ) {
     this.#config = config;
     this.#chatService = chatService;
@@ -111,6 +115,15 @@ export class SlackBridge {
       });
     });
     this.#registerListeners();
+    if (registry) this.delegations = new SlackDelegationPublisher(config, registry, this.#deliveryQueue, (channel, thread) => ({
+      post: async text => {
+        const result = await this.#progressClient.chat.postMessage({ channel, thread_ts: thread, text, unfurl_links: false, unfurl_media: false });
+        if (!result.ts) throw new Error("Slack did not return a message timestamp");
+        return result.ts;
+      },
+      update: async (ts, text) => { await this.#progressClient.chat.update({ channel, ts, text }); },
+      remove: async ts => { await this.#progressClient.chat.delete({ channel, ts }); },
+    }), error => this.#logger.warn("slack_delegation_delivery_failed", { agentId: config.agentId, error }));
   }
 
   async start(): Promise<void> {
@@ -135,12 +148,14 @@ export class SlackBridge {
       teamId: identity.team_id,
       botUserId: identity.user_id,
     });
+    await this.delegations?.recover();
   }
 
   async stop(): Promise<void> {
     this.#connectionMonitor.stop();
     this.#uiBroker.cancelAll();
     this.#deliveryQueue.close();
+    await this.delegations?.close();
     await Promise.allSettled([...this.#consoleReporters].map((reporter) => reporter.close()));
     await this.#app.stop();
   }
@@ -313,9 +328,15 @@ export class SlackBridge {
     let finalized = false;
     const finishResponse = async (result: PiTurnResult): Promise<void> => {
       finalized = true;
-      const responseText = managerObservation
+      const childDelivery = result.runId ? await this.delegations?.finishParent(result.runId) : true;
+      let responseText = managerObservation
         ? managerVisibleResponse(result.text)
         : result.text;
+      if (childDelivery === false) {
+        const notice = "Worker завершив роботу, але доставка його стрічки перервана. Результат доступний менеджеру; вже виконані дії не повторювалися.";
+        if (consoleReporter) consoleReporter.record({ type: "public_notice", text: notice });
+        else responseText += `\n\n${notice}`;
+      }
       if (!responseText) {
         await progress.close();
         this.#logger.info("manager_observation_silent", {

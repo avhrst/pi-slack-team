@@ -346,9 +346,9 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
   const workers = config.role === "manager" ? config.interAgent?.peers.filter((peer) => peer.role === "worker") ?? [] : [];
   if (workers.length) pi.registerTool({
     name: "delegate_to_worker", label: "Delegate via tmux",
-    description: `Delegate to a persistent tmux specialist and await its result. Workers: ${workers.map((w) => w.agentId).join(", ")}. No Slack bot messages. Timeout/abort cannot undo work already performed.`,
+    description: `Delegate to a persistent tmux specialist and await its result. Workers: ${workers.map((w) => w.agentId).join(", ")}. Slack-origin tasks show the worker's visible stream automatically; summarize its outcome without repeating that stream. Timeout/abort cannot undo work already performed.`,
     parameters: Type.Object({ workerId: Type.String(), task: Type.String({ minLength: 1 }) }),
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate) {
       const worker = workers.find((peer) => peer.agentId === params.workerId);
       if (!worker) throw new Error("Unknown or unauthorized worker");
       const task = params.task.trim();
@@ -357,7 +357,8 @@ export default function tmuxAgent(pi: ExtensionAPI): void {
       signal?.throwIfAborted();
       const id = crypto.randomUUID();
       const expiresAt = Math.min(active?.expiresAt ?? Infinity, Date.now() + config.interAgent!.requestTimeoutMs);
-      const request = { id, to: worker.agentId, task, origin: active?.origin ?? { kind: "local" }, createdAt: Date.now(), expiresAt };
+      const request = { id, to: worker.agentId, task, origin: active?.origin ?? { kind: "local" },
+        ...(active ? { parentRunId: active.id, toolCallId } : {}), createdAt: Date.now(), expiresAt };
       const waitSignal = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
       onUpdate?.({ content: [{ type: "text", text: `${worker.agentId}: завдання передано, очікую початку роботи` }], details: workerProgressDetails(worker.agentId, "Завдання передано; очікую початку роботи") });
       await mailbox.put(bufferName("out-request", id), request);

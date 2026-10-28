@@ -23,6 +23,7 @@ export interface IncomingSlackMessage {
   subtype?: string;
   botId?: string;
   senderAppId?: string;
+  mentionedUserIds?: string[];
 }
 
 export function conversationKey(

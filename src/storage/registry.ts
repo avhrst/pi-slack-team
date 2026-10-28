@@ -149,6 +149,12 @@ export class Registry {
         PRIMARY KEY (team_id, app_id, channel_id, thread_ts)
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS slack_publications (
+        publication_id TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+
       CREATE INDEX IF NOT EXISTS processed_events_processed_at
         ON processed_events (processed_at);
 
@@ -315,6 +321,28 @@ export class Registry {
       SELECT team_id, app_id, channel_id, thread_ts, 1 FROM conversations
        WHERE channel_id GLOB '[CG]*'
     `);
+  }
+
+  ensureDelegatedThread(key: ConversationKey): void {
+    this.#statement(`INSERT OR IGNORE INTO slack_threads
+      (team_id, app_id, channel_id, thread_ts, engaged) VALUES (?, ?, ?, ?, 0)`)
+      .run(key.teamId, key.appId, key.channelId, key.threadTs);
+  }
+
+  savePublication(id: string, state: unknown): void {
+    this.#statement(`INSERT INTO slack_publications VALUES (?, ?, ?)
+      ON CONFLICT(publication_id) DO UPDATE SET state_json=excluded.state_json, updated_at=excluded.updated_at`)
+      .run(id, JSON.stringify(state), new Date().toISOString());
+  }
+
+  loadPublication<T>(id: string): T | undefined {
+    const row = this.#statement("SELECT state_json FROM slack_publications WHERE publication_id=?").get(id) as { state_json: string } | undefined;
+    return row ? JSON.parse(row.state_json) as T : undefined;
+  }
+
+  publications<T>(): Array<{ id: string; state: T }> {
+    return (this.#statement("SELECT publication_id, state_json FROM slack_publications").all() as Array<{ publication_id: string; state_json: string }>)
+      .map(row => ({ id: row.publication_id, state: JSON.parse(row.state_json) as T }));
   }
 
   threadState(key: ConversationKey): { engaged: boolean; contextTs?: string } {

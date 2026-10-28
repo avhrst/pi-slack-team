@@ -24,6 +24,7 @@ import type { RpcClientOptions } from "./rpc-client.js";
 import { PUBLIC_PROGRESS_GUIDANCE } from "./activity-progress.js";
 
 export interface PiTurnResult {
+  runId?: string;
   text: string;
   sessionFile: string;
   sessionId: string;

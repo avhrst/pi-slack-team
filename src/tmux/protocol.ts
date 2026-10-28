@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { z } from "zod";
+import type { RpcRecord } from "../pi/rpc-client.js";
 
 export const idSchema = z.string().uuid();
 export const agentIdSchema = z.string().regex(/^[a-z][a-z0-9-]{1,62}$/);
@@ -31,6 +32,8 @@ export const delegationSchema = z.object({
   to: agentIdSchema,
   task: z.string().trim().min(1).max(37_000),
   origin: originSchema,
+  parentRunId: idSchema.optional(),
+  toolCallId: z.string().min(1).max(300).optional(),
   createdAt: z.number().int().positive(),
   expiresAt: z.number().int().positive(),
 }).strict();
@@ -41,8 +44,26 @@ export type PeerRequest = z.infer<typeof peerRequestSchema>;
 export const peerResponseSchema = z.object({
   id: idSchema, to: agentIdSchema, ok: z.boolean(),
   text: z.string().max(100_000),
+  finalOutputSequence: z.number().int().nonnegative().optional(),
 }).strict();
 export type PeerResponse = z.infer<typeof peerResponseSchema>;
+
+export const delegationOutputSchema = z.object({
+  id: idSchema, parentRunId: idSchema, toolCallId: z.string().min(1).max(300),
+  workerId: agentIdSchema, from: agentIdSchema,
+  origin: originSchema,
+  events: z.array(z.object({ sequence: z.number().int().positive(), event: z.object({ type: z.string() }).catchall(z.unknown()) })).min(1).max(16),
+}).strict();
+export type DelegationOutput = z.infer<typeof delegationOutputSchema>;
+export type DelegationContext = Omit<DelegationOutput, "events">;
+
+export interface DelegationPresenter {
+  begin(context: DelegationContext): Promise<{ route: "worker" | "manager"; reason?: string }>;
+  record(context: DelegationContext, sequence: number, event: RpcRecord): void;
+  finish(context: DelegationContext, ok: boolean, text: string): Promise<boolean>;
+  consume(packet: DelegationOutput): void;
+  finishParent?(parentRunId: string): Promise<boolean>;
+}
 
 export const readySchema = z.object({
   agentId: agentIdSchema, instanceId: idSchema,

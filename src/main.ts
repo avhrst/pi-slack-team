@@ -109,8 +109,10 @@ async function start(configPath: string): Promise<void> {
     interAgent,
     logger,
     failRuntime,
+    registry,
   );
   slackReference.bridge = bridge;
+  if (pool instanceof TmuxAgentRunner) pool.presenter = bridge.delegations;
 
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
@@ -127,10 +129,11 @@ async function start(configPath: string): Promise<void> {
     pruneState();
     pruneTimer = setInterval(pruneState, STATE_PRUNE_INTERVAL_MS);
     pruneTimer.unref();
-    if (pool instanceof TmuxAgentRunner) await pool.start();
+    if (pool instanceof TmuxAgentRunner) await pool.start(false);
     await interAgent.start();
     await bridge.start();
     if (pool instanceof TmuxAgentRunner) {
+      pool.startPeers();
       let healthCheckRunning = false;
       healthTimer = setInterval(() => {
         // A slow tmux server must not pile up overlapping health probes.

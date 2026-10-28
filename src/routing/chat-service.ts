@@ -199,6 +199,10 @@ export class ChatService {
   ): string | undefined {
     if (message.teamId !== this.#config.slack.teamId) return "wrong-team";
     if (message.appId !== this.#config.slack.appId) return "wrong-app";
+    if (this.#config.role === "manager" && message.kind === "channel-message" && !message.botId &&
+        this.#config.interAgent?.peers.some(peer => (message.mentionedUserIds ?? []).includes(peer.botUserId))) {
+      return "addressed-to-peer";
+    }
     const validDirectMessage =
       message.kind === "direct-message" &&
       message.channelType === "im" &&

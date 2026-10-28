@@ -9,9 +9,11 @@ import { ActivityProgress } from "../pi/activity-progress.js";
 import type { PiTurnResult, PiUiHandler } from "../pi/session-pool.js";
 import type { ConversationKey, ConversationRecord, Registry } from "../storage/registry.js";
 import { bufferName, TmuxMailbox, tmuxSocketPath } from "./mailbox.js";
-import { peerRequestSchema, readySchema, runResultSchema, workerRunId, type PeerRequest, type RunRequest, type RunResult } from "./protocol.js";
+import { delegationOutputSchema, peerRequestSchema, readySchema, runResultSchema, workerRunId, type DelegationContext, type DelegationPresenter, type PeerRequest, type PeerResponse, type RunRequest, type RunResult } from "./protocol.js";
+import { RunEventWindow } from "./event-window.js";
 
 export class TmuxAgentRunner {
+  presenter: DelegationPresenter | undefined;
   readonly mailbox: TmuxMailbox;
   readonly #stop = new AbortController();
   readonly #peers = new Map<string, Promise<void>>();
@@ -31,7 +33,7 @@ export class TmuxAgentRunner {
     this.mailbox = new TmuxMailbox(config.pi.tmuxCommand, tmuxSocketPath(config));
   }
 
-  async start(): Promise<void> {
+  async start(receivePeers = true): Promise<void> {
     fs.mkdirSync(this.config.stateDir, { recursive: true, mode: 0o700 });
     const session = this.config.expectedUnixUser;
     const sessions = await this.mailbox.exec(["list-sessions", "-F", "#{session_name}"])
@@ -67,16 +69,21 @@ export class TmuxAgentRunner {
       try {
         const ready = await this.health();
         this.#instanceId = ready.instanceId;
-        this.#peerLoop = this.#receivePeers();
-        void this.#peerLoop.catch((error: unknown) => {
-          if (!this.#stop.signal.aborted) this.#peerFailure = true;
-          this.logger.error("tmux_peer_loop_failed", { agentId: this.config.agentId, error });
-        });
+        if (receivePeers) this.startPeers();
         this.logger.info("tmux_agent_ready", { agentId: this.config.agentId, session, socketPath: this.mailbox.socketPath, sessionId: ready.sessionId });
         return;
       } catch { await this.mailbox.wait(this.#stop.signal, 500); }
     }
     throw new Error(`Interactive Pi did not become ready. Inspect tmux session ${session}.`);
+  }
+
+  startPeers(): void {
+    if (this.#peerLoop) return;
+    this.#peerLoop = this.#receivePeers();
+    void this.#peerLoop.catch((error: unknown) => {
+      if (!this.#stop.signal.aborted) this.#peerFailure = true;
+      this.logger.error("tmux_peer_loop_failed", { agentId: this.config.agentId, error });
+    });
   }
 
   async health() {
@@ -105,9 +112,10 @@ export class TmuxAgentRunner {
     try {
       const result = await this.#run(request, onEvent, { ...conversation, ownerUserId: sourceUserId }, () => this.registry.setStatus(key, "running"));
       this.registry.setStatus(key, "idle");
-      return { text: result.text, sessionFile: result.sessionFile, sessionId: result.sessionId };
+      return { runId: request.id, text: result.text, sessionFile: result.sessionFile, sessionId: result.sessionId };
     } catch (error) {
       this.registry.setStatus(key, "error");
+      await this.presenter?.finishParent?.(request.id);
       throw error;
     }
   }
@@ -131,10 +139,30 @@ export class TmuxAgentRunner {
       while (!this.#stop.signal.aborted && Date.now() < request.expiresAt) {
         if (Date.now() - lastHealth > 3_000) { await this.health(); lastHealth = Date.now(); }
         const names = await this.mailbox.list();
+        // Child packets bypass Pi entirely. Persist renderer state before acknowledging.
+        for (const name of names.filter(name => name.startsWith(`pst-child-events-${request.id}-`)).sort((a, b) => Number(a.split("-").at(-1)) - Number(b.split("-").at(-1)))) {
+          const packet = delegationOutputSchema.parse(await this.mailbox.read(name));
+          const worker = this.config.interAgent?.peers.find(peer => peer.agentId === packet.workerId && peer.role === "worker");
+          if (!worker || packet.parentRunId !== request.id || packet.from !== this.config.agentId ||
+              JSON.stringify(packet.origin) !== JSON.stringify(request.origin) ||
+              name !== `pst-child-events-${request.id}-${packet.id}-${packet.events[0]!.sequence}`) throw new Error("Invalid child output correlation");
+          this.presenter?.consume(packet);
+          for (const item of packet.events) {
+            const event = item.event;
+            if (["delegation_start", "agent_start", "delegation_end"].includes(String(event.type))) {
+              const text = event.type === "delegation_start" ? `${packet.workerId}: завдання прийнято; очікую черги.`
+                : event.type === "agent_start" ? `${packet.workerId}: виконує завдання.`
+                : `${packet.workerId}: ${event.ok ? "завершено" : "помилка"}. ${event.deliveryFailed ? "Доставка стрічки перервана; результат доступний менеджеру." : "Стрічку результату показано окремо."}`;
+              onEvent?.({ type: "delegation_status", toolCallId: packet.toolCallId, text });
+            }
+          }
+          const ack = await this.mailbox.readIfPresent(bufferName("child-ack", packet.id)) as { throughSequence?: number } | undefined;
+          await this.mailbox.put(bufferName("child-ack", packet.id), { parentRunId: request.id, throughSequence: Math.max(ack?.throughSequence ?? 0, packet.events.at(-1)!.sequence) }, false);
+          await this.mailbox.remove(name);
+        }
         if (!accepted && names.includes(bufferName("accepted", request.id))) {
           accepted = true;
           onAccepted?.();
-          onEvent?.({ type: "agent_start" });
         }
         const eventPrefix = bufferName("events", request.id);
         const packets = names.filter((name) => name === eventPrefix || name.startsWith(`${eventPrefix}-`))
@@ -217,14 +245,57 @@ export class TmuxAgentRunner {
     if ((await this.mailbox.list(replyName)).includes(replyName)) return;
     let ok = false;
     let text = "Unauthorized delegation";
+    let finalOutputSequence: number | undefined;
+    let persistReceipt = false;
     const authorized = this.config.role === "worker" && request.to === this.config.agentId && peer &&
       (request.origin.kind === "local" || (request.origin.teamId === this.config.slack.teamId &&
         request.origin.appId === peer.appId && this.config.slack.allowedUserIds.includes(request.origin.userId)));
     if (authorized) {
       const claimed = this.registry.claimEvent(`tmux-peer:${request.from}:${request.id}`);
-      if (!claimed) text = "Previous worker delivery was interrupted or already accepted; not replaying tools.";
+      if (!claimed) {
+        const receipt = this.registry.loadPublication<{ requestHash: string; response: PeerResponse }>(`peer-result:${request.from}:${request.id}`);
+        if (receipt?.requestHash === peerFingerprint(request)) {
+          if (!(await this.mailbox.list(`pst-out-events-${request.from}-${request.id}-`)).length) receipt.response.finalOutputSequence = 0;
+          await this.mailbox.put(replyName, receipt.response); return;
+        }
+        text = "Previous worker delivery was interrupted or already accepted; not replaying tools.";
+      }
       else {
+        persistReceipt = true;
         const id = workerRunId(request.from, request.id);
+        if (request.origin.kind === "slack") this.registry.ensureDelegatedThread({
+          teamId: request.origin.teamId, appId: this.config.slack.appId,
+          channelId: request.origin.channelId, threadTs: request.origin.threadTs,
+        });
+        const context: DelegationContext | undefined = request.origin.kind === "slack" && request.parentRunId && request.toolCallId && this.presenter ? {
+          id: request.id, from: request.from, workerId: this.config.agentId,
+          parentRunId: request.parentRunId, toolCallId: request.toolCallId, origin: request.origin,
+        } : undefined;
+        const output = new RunEventWindow();
+        let outputWrite = Promise.resolve();
+        let publishedSequence = 0;
+        const publish = () => {
+          outputWrite = outputWrite.then(async () => {
+            while (context && output.events.length) {
+              const events = output.batch();
+              if (!events.length) throw new Error("Child output exceeds the transport bound");
+              await this.mailbox.put(`pst-out-events-${request.from}-${request.id}-${events[0]!.sequence}`, { ...context, events }, false);
+              output.published(events.at(-1)!.sequence);
+              publishedSequence = events.at(-1)!.sequence;
+            }
+          }).catch(() => { /* Retain the packet window for the next flush; never replay Pi. */ });
+        };
+        const visible = (event: RpcRecord) => {
+          if (!context) return;
+          if (event.type === "delegation_end" && typeof event.text === "string") {
+            let text = event.text;
+            while (Buffer.byteLength(JSON.stringify(text)) > 400_000) text = text.slice(0, Math.floor(text.length * 0.8));
+            event = { ...event, text: text.length === event.text.length ? text : `${text}\n[transport text truncated]` };
+          }
+          output.push(event);
+          this.presenter!.record(context, output.sequence, event);
+          publish();
+        };
         const activity = new ActivityProgress();
         let status = "";
         let statusWrite = Promise.resolve();
@@ -237,23 +308,38 @@ export class TmuxAgentRunner {
         };
         progress(activity.describe());
         try {
+          if (context) {
+            const route = await this.presenter!.begin(context);
+            visible({ type: "delegation_start", ...route });
+          }
           const result = await this.#run({
             id, text: request.task, origin: request.origin, fromAgent: request.from,
             createdAt: request.createdAt,
             expiresAt: Math.min(request.expiresAt, Date.now() + this.config.pi.turnTimeoutMs),
           }, (event) => {
             if (activity.record(event)) progress(activity.describe());
+            visible(event);
           });
           text = result.text;
           ok = true;
         } catch (error) { text = error instanceof Error ? error.message : "Worker failed"; }
+        if (context) {
+          const delivered = await this.presenter!.finish(context, ok, text).catch(() => false);
+          visible({ type: "delegation_end", ok, text, deliveryFailed: !delivered });
+          await outputWrite;
+          finalOutputSequence = publishedSequence;
+          if (output.events.length) text += "\nWorker output transport was interrupted; executed actions were not replayed.";
+        }
         await statusWrite;
       }
     }
-    await this.mailbox.put(replyName, {
+    const response: PeerResponse = {
       id: request.id, to: request.from, ok,
       text: text.slice(0, this.config.interAgent?.maxResponseChars ?? 50_000),
-    });
+      ...(finalOutputSequence !== undefined ? { finalOutputSequence } : {}),
+    };
+    if (persistReceipt) this.registry.savePublication(`peer-result:${request.from}:${request.id}`, { requestHash: peerFingerprint(request), response });
+    await this.mailbox.put(replyName, response);
     this.logger.info("tmux_peer_completed", { agentId: this.config.agentId, from: request.from, requestId: request.id, ok });
   }
 
@@ -267,4 +353,10 @@ export class TmuxAgentRunner {
     if (this.#ownsSession) await this.mailbox.exec(["kill-session", "-t", this.config.expectedUnixUser]).catch(() => undefined);
     this.#ownsSession = false;
   }
+}
+
+function peerFingerprint(request: PeerRequest): string {
+  const identity: Omit<PeerRequest, "expiresAt"> & { expiresAt?: number } = { ...request };
+  delete identity.expiresAt;
+  return crypto.createHash("sha256").update(JSON.stringify(identity)).digest("hex");
 }

@@ -17,7 +17,7 @@ import { TmuxMailbox, bufferName, tmuxSocketPath } from "../src/tmux/mailbox.js"
 import { TmuxAgentRunner } from "../src/tmux/agent-runner.js";
 import tmuxAgent from "../src/tmux/agent-extension.js";
 import { TmuxRelay, authorizeRelay } from "../src/tmux/relay.js";
-import { workerRunId, type Delegation, type RunRequest } from "../src/tmux/protocol.js";
+import { workerRunId, type Delegation, type RunRequest, type DelegationOutput } from "../src/tmux/protocol.js";
 
 const tmux = ["/usr/local/bin/tmux", "/usr/bin/tmux", "/opt/homebrew/bin/tmux"].find((file) => fs.existsSync(file));
 const available = Boolean(tmux && spawnSync(tmux, ["-V"]).status === 0);
@@ -422,6 +422,53 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     expect(workerAgent.calls[0]).toContain("Delegated by trusted configured agent: manager");
   }, 20_000);
 
+  it.each(["worker", "manager"] as const)("drains over 16 child events through relay directly to the %s renderer before returning a result", async route => {
+    const manager = config("manager");
+    const worker = config();
+    const managerAgent = await fakeAgent(manager, async () => {
+      await managerAgent.emit("tool_execution_start", { toolCallId: "delegate-1", toolName: "delegate_to_worker", args: { workerId: "worker" } });
+      const result = await managerAgent.tools.get("delegate_to_worker")!.execute("delegate-1", { workerId: "worker", task: "safe task" }, new AbortController().signal);
+      await managerAgent.emit("tool_execution_end", { toolCallId: "delegate-1", toolName: "delegate_to_worker", result });
+      return "Manager summary";
+    });
+    const workerAgent = await fakeAgent(worker, async () => {
+      for (let i = 0; i < 30; i++) await workerAgent.emit("message_end", { message: { role: "assistant", stopReason: "toolUse", content: [
+        { type: "text", text: `step ${i}` }, { type: "thinking", thinking: "PRIVATE_THINKING" },
+      ] } });
+      return "Worker final";
+    });
+    const workerRegistry = new Registry(path.join(worker.stateDir, "state.sqlite"));
+    const managerRegistry = new Registry(path.join(manager.stateDir, "state.sqlite"));
+    cleanup.push(() => workerRegistry.close(), () => managerRegistry.close());
+    const childPackets: DelegationOutput[] = [];
+    const begin = vi.fn(async () => ({ route }));
+    const finish = vi.fn(async () => true);
+    const workerRunner = new TmuxAgentRunner(worker, workerAgent.configPath, workerRegistry, logger);
+    workerRunner.presenter = { begin, finish, record: vi.fn(), consume: vi.fn() };
+    const managerRunner = new TmuxAgentRunner(manager, managerAgent.configPath, managerRegistry, logger);
+    managerRunner.presenter = { begin, finish, record: vi.fn(), consume: packet => { childPackets.push(packet); } };
+    await workerRunner.start(); await managerRunner.start();
+    cleanup.push(() => managerRunner.shutdown(), () => workerRunner.shutdown());
+    const relay = new TmuxRelay([manager, worker], logger);
+    const controller = new AbortController();
+    const relaying = relay.run(controller.signal);
+    cleanup.push(async () => { controller.abort(); await relaying; });
+    const parentEvents: RpcRecord[] = [];
+    const result = await managerRunner.prompt({ teamId: "TTEST", appId: "AMANAGER", channelId: route === "manager" ? "DTEST" : "CTEST", threadTs: "1.0" }, "UALICE", "Please delegate", event => parentEvents.push(event));
+    expect(result.text).toBe("Manager summary");
+    expect(begin).toHaveBeenCalledWith(expect.objectContaining({ parentRunId: result.runId, toolCallId: "delegate-1", workerId: "worker" }));
+    const events = childPackets.flatMap(packet => packet.events);
+    expect(childPackets.length).toBeGreaterThan(2);
+    expect(events.filter(item => item.event.type === "message_end")).toHaveLength(31);
+    expect(events.at(-1)?.event).toMatchObject({ type: "delegation_end", text: "Worker final", ok: true });
+    expect(JSON.stringify(events)).not.toContain("PRIVATE_THINKING");
+    expect(parentEvents).toContainEqual(expect.objectContaining({ type: "delegation_status", toolCallId: "delegate-1", text: expect.stringContaining("завершено") }));
+    expect(workerAgent.calls).toHaveLength(1);
+    expect(managerAgent.calls).toHaveLength(1);
+    const key = { teamId: "TTEST", appId: "AWORKER", channelId: route === "manager" ? "DTEST" : "CTEST", threadTs: "1.0" };
+    expect(workerRegistry.threadState(key).engaged).toBe(false);
+  }, 30_000);
+
   it("refuses unrelated tmux sessions and never kills them on failed startup", async () => {
     const cfg = config();
     const box = await server(cfg);
@@ -432,6 +479,62 @@ describe.skipIf(!available)("real tmux mailbox integration", () => {
     await expect(runner.start()).rejects.toThrow("unrelated");
     await runner.shutdown();
     expect(await box.exec(["list-sessions", "-F", "#{session_name}"])).toContain("unrelated");
+  });
+
+  it("acknowledges a busy worker before Pi accepts it, and returns cached duplicates without replay or cross-user receipt disclosure", async () => {
+    const worker = config(); const agent = await fakeAgent(worker);
+    const idle = vi.spyOn(agent.ctx, "isIdle").mockReturnValue(false);
+    const registry = new Registry(path.join(worker.stateDir, "state.sqlite")); cleanup.push(() => registry.close());
+    const runner = new TmuxAgentRunner(worker, agent.configPath, registry, logger);
+    const begin = vi.fn(async () => ({ route: "worker" as const }));
+    const record = vi.fn();
+    runner.presenter = { begin, record, finish: vi.fn(async () => true), consume: vi.fn() };
+    await runner.start(); cleanup.push(() => runner.shutdown());
+    const request = { ...delegation(worker), from: "manager", parentRunId: crypto.randomUUID(), toolCallId: "call-1", origin: { kind: "slack" as const, teamId: "TTEST", appId: "AMANAGER", channelId: "CTEST", threadTs: "1.0", userId: "UALICE" } };
+    const inbox = `pst-peer-in-manager-${request.id}`; const reply = `pst-out-response-manager-${request.id}`;
+    await agent.mailbox.put(inbox, request);
+    await until(async () => begin.mock.calls.length === 1);
+    expect(agent.calls).toHaveLength(0);
+    expect(record.mock.calls.some(call => call[2].type === "agent_start")).toBe(false);
+    idle.mockRestore();
+    await until(async () => (await agent.mailbox.list()).includes(reply));
+    const first = await agent.mailbox.read(reply);
+    expect(first).toMatchObject({ ok: true });
+    await agent.mailbox.remove(reply);
+    await until(async () => (await agent.mailbox.list()).includes(reply));
+    expect(await agent.mailbox.read(reply)).toEqual(first);
+    expect(agent.calls).toHaveLength(1);
+    expect(begin).toHaveBeenCalledTimes(1);
+    await agent.mailbox.put(inbox, { ...request, origin: { ...request.origin, userId: "UBOB" } });
+    await agent.mailbox.remove(reply);
+    await until(async () => (await agent.mailbox.list()).includes(reply));
+    expect(await agent.mailbox.read(reply)).toMatchObject({ ok: false, text: expect.stringContaining("not replaying") });
+    expect(agent.calls).toHaveLength(1);
+  }, 20_000);
+
+  it("retains immutable child packets across slow reads and relay restart, holding the result until the final acknowledgement", async () => {
+    const manager = config("manager"); const worker = config();
+    const source = await server(manager); const target = await server(worker);
+    await target.put("pst-ready", { agentId: worker.agentId, instanceId: crypto.randomUUID(), sessionFile: "/shared", sessionId: "session", busy: false, updatedAt: Date.now() });
+    const request = { ...delegation(worker), parentRunId: crypto.randomUUID(), toolCallId: "call-1", origin: { kind: "slack" as const, teamId: "TTEST", appId: "AMANAGER", channelId: "GTEST", threadTs: "1.0", userId: "UALICE" } };
+    await source.put(bufferName("out-request", request.id), request);
+    for (const first of [1, 17]) await target.put(`pst-out-events-manager-${request.id}-${first}`, { id: request.id, parentRunId: request.parentRunId, toolCallId: "call-1", workerId: "worker", from: "manager", origin: request.origin,
+      events: Array.from({ length: first === 1 ? 16 : 14 }, (_, index) => ({ sequence: first + index, event: { type: "agent_start" } })),
+    });
+    await target.put(`pst-out-response-manager-${request.id}`, { id: request.id, to: "manager", ok: true, text: "done", finalOutputSequence: 30 });
+    await new TmuxRelay([manager, worker], logger).tick();
+    expect(await source.list("pst-child-events-")).toHaveLength(2);
+    expect(await source.list("pst-peer-result-")).toHaveLength(0);
+    const restarted = new TmuxRelay([manager, worker], logger); await restarted.tick();
+    expect(await source.list("pst-child-events-")).toHaveLength(2);
+    await source.put(`pst-child-ack-${request.id}`, { parentRunId: request.parentRunId, throughSequence: 16 });
+    await restarted.tick();
+    expect(await target.list("pst-out-events-")).toHaveLength(1);
+    expect(await source.list("pst-peer-result-")).toHaveLength(0);
+    await source.put(`pst-child-ack-${request.id}`, { parentRunId: request.parentRunId, throughSequence: 30 });
+    await restarted.tick();
+    expect(await source.read(`pst-peer-result-${request.id}`)).toMatchObject({ text: "done", finalOutputSequence: 30 });
+    expect(await target.list("pst-out-events-")).toHaveLength(0);
   });
 
   it("reports an offline worker without allocating an extra session", async () => {

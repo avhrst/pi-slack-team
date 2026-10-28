@@ -24,7 +24,7 @@ The rest of this README describes the legacy **`pi.transport: rpc`** backend unl
 
 - One immutable identity chain per runtime: Slack app → Unix account → Pi agent.
 - Two roles: on-demand `worker` and proactive `manager`.
-- Opt-in, correlated manager-to-worker delegation in a shared Slack thread.
+- Opt-in manager-to-worker delegation with the worker’s own Slack console stream; labelled manager relay for DMs or unavailable channels (tmux 0.4.1).
 - Exact Slack workspace, app, human-user, and inter-agent peer authorization.
 - One persistent Pi JSONL session per Slack DM/thread.
 - Persistent thread engagement and incremental, bounded untrusted Slack context.
@@ -58,7 +58,7 @@ role: worker # or manager
 
 ### Worker
 
-A worker is an on-demand specialist. It receives authorized DMs and explicit `@agent` mentions. The first mention (or trusted delegation) engages the agent in that thread; subsequent replies from allowed humans need no mention. Other channel conversations cannot allocate a Pi session or invoke tools. Engagement survives restarts. Existing worker channel conversations are engaged on upgrade; legacy manager conversations need a new mention because old state does not distinguish observations from invocations.
+A worker is an on-demand specialist. It receives authorized DMs and explicit `@agent` mentions. The first human mention engages the agent in that thread; subsequent replies from allowed humans need no mention. Tmux delegation alone keeps a new worker thread inactive, so plain followups stay with the manager; existing engaged threads are preserved. RPC retains its trusted-mention behavior. Other channel conversations cannot allocate a Pi session or invoke tools. Engagement survives restarts. Existing worker channel conversations are engaged on upgrade; legacy manager conversations need a new mention because old state does not distinguish observations from invocations.
 
 Use [the public worker manifest](manifests/worker-agent.example.yaml) and [the worker config example](config/worker.example.yaml).
 

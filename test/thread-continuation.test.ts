@@ -26,7 +26,7 @@ function setup(role: "worker" | "manager" = "worker") {
     return { text: "done", sessionFile: path.join(root, "session.jsonl"), sessionId: "session" };
   });
   const service = () => new ChatService(config, registry, { prompt }, createLogger(() => undefined));
-  return { registry, prompt, service };
+  return { registry, prompt, service, config };
 }
 function message(overrides: Partial<IncomingSlackMessage> = {}): IncomingSlackMessage {
   return { kind: "app-mention", eventId: "Ev1", teamId: "T01", appId: "A01", channelId: "C01",
@@ -116,6 +116,33 @@ describe("engaged Slack threads", () => {
     await expect(chat.handleMessage(message({ kind: "channel-message", eventId: "Ev2", threadTs: "999.000" })))
       .resolves.toMatchObject({ reason: "unsupported-conversation" });
     expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps delegated worker threads inactive through backfill and activates only on a human mention", async () => {
+    const { registry, prompt, service } = setup();
+    const first = message();
+    const key = conversationKey(first);
+    registry.ensureDelegatedThread(key);
+    registry.createConversation(key, "U01");
+    const restarted = service();
+    expect(registry.threadState(key).engaged).toBe(false);
+    await expect(restarted.handleMessage(message({ kind: "channel-message", eventId: "Ev2", threadTs: first.ts }))).resolves.toMatchObject({ reason: "unsupported-conversation" });
+    expect(prompt).not.toHaveBeenCalled();
+    await restarted.handleMessage(message({ eventId: "Ev3", threadTs: first.ts }));
+    registry.ensureDelegatedThread(key);
+    expect(registry.threadState(key).engaged).toBe(true);
+    await service().handleMessage(message({ kind: "channel-message", eventId: "Ev4", threadTs: first.ts }));
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets only the addressed peer handle explicit peer mentions, while the manager keeps plain followups", async () => {
+    const { config, service, prompt } = setup("manager");
+    config.interAgent = { peers: [{ agentId: "worker", role: "worker", botUserId: "UWORKER", appId: "AWORKER" }], maxTaskChars: 30000, maxResponseChars: 50000, requestTimeoutMs: 60000 };
+    const chat = service();
+    await chat.handleMessage(message());
+    await expect(chat.handleMessage(message({ kind: "channel-message", eventId: "Ev2", threadTs: "100.000", mentionedUserIds: ["UWORKER"], text: "<@UWORKER> task" }))).resolves.toMatchObject({ reason: "addressed-to-peer" });
+    await chat.handleMessage(message({ kind: "channel-message", eventId: "Ev3", threadTs: "100.000", mentionedUserIds: [], text: "literal <@UWORKER>" }));
+    expect(prompt).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the history cursor on failure and never rewinds it on a delayed event", async () => {

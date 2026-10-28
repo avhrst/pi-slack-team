@@ -6,10 +6,12 @@ import { toSlackMrkdwn } from "./pi-progress.js";
 
 export const CONSOLE_MESSAGE_CHARS = 3_500;
 const PREVIEW_LINES = 10;
-type Entry =
+export type ConsoleEntry =
   | { id: string; kind: "assistant"; text: string; complete: boolean }
   | { id: string; kind: "tool"; name: string; args: unknown; output: string; outputLines?: number; state: "running" | "completed" | "failed" }
   | { id: string; kind: "status"; text: string };
+type Entry = ConsoleEntry;
+export interface ConsoleSnapshot { entries: Entry[]; sequence: number; delegatedTools: Array<[string, string]>; statuses?: Array<[string, string]> }
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -49,8 +51,39 @@ export class ConsoleTranscript {
   #sequence = 0;
   #assistant: Extract<Entry, { kind: "assistant" }> | undefined;
   #lastAssistant: Extract<Entry, { kind: "assistant" }> | undefined;
+  readonly #delegatedTools = new Map<string, string>();
+
+  constructor(snapshot?: ConsoleSnapshot) {
+    if (!snapshot) return;
+    this.#entries.push(...structuredClone(snapshot.entries));
+    this.#sequence = snapshot.sequence;
+    for (const pair of snapshot.delegatedTools) this.#delegatedTools.set(...pair);
+    for (const entry of this.#entries) {
+      if (entry.kind === "tool") this.#tools.set(entry.id.slice(5), entry);
+      if (entry.kind === "assistant") {
+        this.#lastAssistant = entry;
+        if (!entry.complete) this.#assistant = entry;
+      }
+    }
+    for (const [operation, id] of snapshot.statuses ?? []) {
+      const entry = this.#entries.find(entry => entry.id === id);
+      if (entry?.kind === "status") this.#statuses.set(operation, entry);
+    }
+  }
+
+  snapshot(): ConsoleSnapshot {
+    return structuredClone({ entries: this.#entries, sequence: this.#sequence, delegatedTools: [...this.#delegatedTools], statuses: [...this.#statuses].map(([operation, entry]) => [operation, entry.id]) });
+  }
 
   record(event: RpcRecord): void {
+    if (event.type === "public_notice" && typeof event.text === "string") {
+      this.#entries.push({ id: `status-${++this.#sequence}`, kind: "status", text: clean(event.text) });
+      return;
+    }
+    if (event.type === "delegation_status" && typeof event.toolCallId === "string" && typeof event.text === "string") {
+      this.#delegatedTools.set(event.toolCallId, clean(event.text));
+      return;
+    }
     if (event.type === "message_start" && record(event.message)?.role === "assistant") {
       this.#finishAssistant();
     }
@@ -130,6 +163,8 @@ export class ConsoleTranscript {
     for (const tool of this.#tools.values()) if (tool.state === "running") tool.state = "failed";
     for (const [operation, status] of this.#statuses) status.text = `${operation === "compaction" ? "Context compaction" : "Model retry"} interrupted.`;
     this.#statuses.clear();
+    const last = this.#entries.at(-1);
+    if (last?.kind === "status" && last.text === message) return;
     this.#entries.push({ id: `status-${++this.#sequence}`, kind: "status", text: message });
   }
 
@@ -148,7 +183,9 @@ export class ConsoleTranscript {
         text = [
           `${state} *${escapeSlackText(entry.name.replaceAll("*", ""))}* · ${entry.state}`,
           code(preview(invocation)),
-          ...(entry.output ? [code(preview(entry.output, entry.outputLines))] : []),
+          ...(this.#delegatedTools.has(entry.id.slice(5))
+            ? [escapeSlackText(this.#delegatedTools.get(entry.id.slice(5))!)]
+            : entry.output ? [code(preview(entry.output, entry.outputLines))] : []),
         ].join("\n");
       }
       return text.trim() ? chunkSlackText(text, CONSOLE_MESSAGE_CHARS)

@@ -116,6 +116,7 @@ function parseEvent(
     ...(typeof event.subtype === "string" ? { subtype: event.subtype } : {}),
     ...(typeof event.bot_id === "string" ? { botId: event.bot_id } : {}),
     ...(senderAppId ? { senderAppId } : {}),
+    mentionedUserIds: [...(rawText ?? "").matchAll(/<@([UW][A-Z0-9]+)>/gu)].map(match => match[1]!),
   };
 }
 
