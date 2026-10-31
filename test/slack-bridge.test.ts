@@ -109,6 +109,65 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+describe("immediate queue acknowledgement", () => {
+  it.each(["console", "informative"] as const)("posts one early %s acknowledgement while the first real lane is blocked", async mode => {
+    vi.useFakeTimers();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-queue-ack-"));
+    const registry = new Registry(path.join(directory, "state.sqlite"));
+    const settings = agentConfigSchema.parse({ ...config, stateDir: directory,
+      slack: { ...config.slack, progressMode: mode }, pi: { ...config.pi, transport: "tmux" } });
+    const posts: Array<{ text: string; ts: string }> = [];
+    const post = async ({ text }: { text: string }) => {
+      const ts = `post-${posts.length + 1}`; posts.push({ text, ts }); return { ts };
+    };
+    slack.postMessage.mockImplementation(post);
+    slack.progressPost.mockImplementation(post);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (key, owner, text, onEvent) => {
+      expect(key.channelId).toBe("D01");
+      expect(owner).toBe("U01");
+      onEvent?.({ type: "agent_start" });
+      if (text === "first") await gate;
+      return { text: text === "first" ? "First result" : "Second result", sessionFile: "/tmp/s", sessionId: "s" };
+    });
+    const service = new ChatService(settings, registry, { prompt }, logger);
+    const interAgent = { setSlackSender: vi.fn(), parseResponse: () => undefined, isTrustedManagerUser: () => false } as unknown as InterAgentGateway;
+    const runtime = new SlackBridge(settings, { botToken: "xoxb-test", appToken: "xapp-test" }, service, interAgent, logger, () => undefined);
+    const route = (id: string, text: string, user = "U01") => slack.listeners.get("message")!({
+      body: { event_id: id, team_id: "T01", api_app_id: "A01" },
+      event: { channel: "D01", channel_type: "im", user, ts: text === "first" ? "1.1" : "1.2", text },
+      client: { chat: { postMessage: slack.postMessage, update: slack.update } },
+    });
+    try {
+      const first = route("EvFirst", "first");
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      const second = route("EvSecond", "second");
+      await vi.advanceTimersByTimeAsync(5_000);
+      const notice = posts.filter(p => p.text.includes("Запит отримано й поставлено в чергу"));
+      expect(notice).toHaveLength(1);
+      expect(notice[0]?.text).toContain("попередній запит");
+      expect(prompt).toHaveBeenCalledTimes(1);
+      await route("EvSecond", "second");
+      await route("EvUnauthorized", "second", "U99");
+      expect(posts.filter(p => p.text.includes("Запит отримано й поставлено в чергу"))).toHaveLength(1);
+      release();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.all([first, second]);
+      expect(prompt).toHaveBeenCalledTimes(2);
+      expect(posts.filter(p => p.text.includes("Запит отримано й поставлено в чергу"))).toHaveLength(1);
+      expect(slack.progressUpdate.mock.calls.some(([call]) => (call as { ts: string }).ts === notice[0]?.ts)).toBe(true);
+    } finally {
+      release();
+      await runtime.stop();
+      registry.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("SlackBridge response delivery", () => {
   it("streams delegated work but posts the final answer only in its correlated response", async () => {
     vi.useFakeTimers();

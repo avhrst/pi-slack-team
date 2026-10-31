@@ -82,10 +82,10 @@ export class SlackConsoleReporter {
     this.persistence?.save({ transcript: this.#transcript.snapshot(), posted: [...this.#posted], pending: [...this.#pending] });
   }
 
-  async start(queued: boolean): Promise<void> {
+  async start(queued: boolean, acknowledgement?: string): Promise<void> {
     try {
       this.#placeholder = await this.queue.send("post", () => this.delivery.post(
-        queued ? ":hourglass_flowing_sand: Queued for the agent…" : ":hourglass_flowing_sand: Working…",
+        acknowledgement ?? (queued ? ":hourglass_flowing_sand: Queued for the agent…" : ":hourglass_flowing_sand: Working…"),
       ), this.#abort.signal);
     } catch (error) { this.onError(error); }
   }

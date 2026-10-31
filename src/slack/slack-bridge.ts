@@ -325,6 +325,32 @@ export class SlackBridge {
         }))
       : undefined;
     if (consoleReporter) this.#consoleReporters.add(consoleReporter);
+    let acknowledgementAttempted = false;
+    const acknowledge = async (context: { isObservation: boolean; waiting?: boolean }): Promise<void> => {
+      managerObservation = context.isObservation;
+      if (managerObservation || acknowledgementAttempted) return;
+      acknowledgementAttempted = true;
+      const queuedText = context.waiting
+        ? ":hourglass_flowing_sand: Запит отримано й поставлено в чергу. Агент ще обробляє попередній запит; відповість після його завершення."
+        : undefined;
+      if (consoleReporter) {
+        await consoleReporter.start(this.#config.pi.transport === "tmux" || Boolean(context.waiting), queuedText);
+        return;
+      }
+      try {
+        const posted = await client.chat.postMessage({
+          unfurl_links: false, unfurl_media: false,
+          channel: message.channelId, thread_ts: message.threadTs ?? message.ts,
+          text: queuedText ?? (this.#config.pi.transport === "tmux"
+            ? ":hourglass_flowing_sand: Queued for the agent…" : ":hourglass_flowing_sand: Working…"),
+        });
+        workingTs = posted.ts;
+      } catch (error) {
+        this.#logger.warn("slack_placeholder_failed", {
+          agentId: this.#config.agentId, eventId: message.eventId, error,
+        });
+      }
+    };
     let finalized = false;
     const finishResponse = async (result: PiTurnResult): Promise<void> => {
       finalized = true;
@@ -389,6 +415,7 @@ export class SlackBridge {
       let disposition: MessageDisposition;
       try {
         disposition = await this.#chatService.handleMessage(message, {
+          onQueued: acknowledge,
           onAccepted: async (context) => {
             managerObservation = context?.isObservation ?? managerObservation;
             // Queued delegations must not cancel dialogs in the current human turn.
@@ -396,29 +423,9 @@ export class SlackBridge {
               this.#delegatedTurns.set(delegatedKey, (this.#delegatedTurns.get(delegatedKey) ?? 0) + 1);
               delegatedAccepted = true;
             }
-            if (managerObservation) return;
-            if (consoleReporter) {
-              await consoleReporter.start(this.#config.pi.transport === "tmux");
-              return;
-            }
-            // The placeholder is cosmetic; Pi still runs and answers without it.
-            try {
-              const posted = await client.chat.postMessage({
-                unfurl_links: false,
-                unfurl_media: false,
-                channel: message.channelId,
-                thread_ts: message.threadTs ?? message.ts,
-                text: this.#config.pi.transport === "tmux"
-                  ? ":hourglass_flowing_sand: Queued for the agent…" : ":hourglass_flowing_sand: Working…",
-              });
-              workingTs = posted.ts;
-            } catch (error) {
-              this.#logger.warn("slack_placeholder_failed", {
-                agentId: this.#config.agentId,
-                eventId: message.eventId,
-                error,
-              });
-            }
+            // Keep UI/delegation state changes inside the lane, but reuse the
+            // early acknowledgement instead of posting a second placeholder.
+            await acknowledge({ isObservation: managerObservation });
           },
           preparePrompt: async ({ isNewConversation, afterTs }) => {
             const currentPrompt = delegatedRequest

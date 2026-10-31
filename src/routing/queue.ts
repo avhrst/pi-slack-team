@@ -1,6 +1,10 @@
 export class KeyedSerialQueue {
   readonly #tails = new Map<string, Promise<void>>();
 
+  isPending(key: string): boolean {
+    return this.#tails.has(key);
+  }
+
   async run<T>(key: string, operation: () => Promise<T>): Promise<T> {
     const predecessor = this.#tails.get(key) ?? Promise.resolve();
     let release: (() => void) | undefined;

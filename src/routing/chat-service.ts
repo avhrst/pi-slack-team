@@ -20,6 +20,9 @@ export type MessageDisposition =
   | { type: "completed"; result: PiTurnResult };
 
 export interface MessageHooks {
+  /** Cosmetic acknowledgement after authorization/dedup, before the serial wait. */
+  onQueued?: (context: { isObservation: boolean; waiting: boolean }) => Promise<void>;
+  /** The lane is acquired; authorization-sensitive turn state may now change. */
   onAccepted?: (context: { isObservation: boolean }) => Promise<void>;
   preparePrompt?: (context: { isNewConversation: boolean; afterTs?: string }) => Promise<
     string | { text: string; contextThroughTs?: string }
@@ -97,7 +100,30 @@ export class ChatService {
     const lane = this.#config.pi.transport === "tmux"
       ? `agent:${key.teamId}:${key.appId}`
       : serializePiSessionKey(piSessionKey(key, message.userId));
+    const sharedManagerChannel = this.#config.role === "manager" &&
+      ["channel-message", "app-mention"].includes(message.kind);
+    const sharedWorkerThread = this.#config.role === "worker" &&
+      ["channel-message", "app-mention"].includes(message.kind);
+    const sharedConversation = sharedManagerChannel || sharedWorkerThread || Boolean(delegation);
+    // Do not acknowledge a private conversation owned by someone else. Repeat
+    // this check inside the lane as ownership may change while we wait.
+    const queuedConversation = this.#registry.getConversation(key);
+    if (queuedConversation && queuedConversation.ownerUserId !== message.userId && !sharedConversation) {
+      this.#logger.warn("slack_conversation_owner_mismatch", {
+        agentId: this.#config.agentId, eventId: message.eventId, userId: message.userId,
+      });
+      return { type: "ignored", reason: "conversation-owner-mismatch" };
+    }
+    const waiting = this.#queue.isPending(lane);
+    // Begin the acknowledgement independently of the predecessor. Register the
+    // operation synchronously (no await here), preserving FIFO even if Slack is
+    // slow. A failed cosmetic acknowledgement must not suppress actual work.
+    const queuedAck = Promise.resolve().then(() => hooks.onQueued?.({ isObservation, waiting }))
+      .catch((error: unknown) => {
+        this.#logger.warn("slack_queue_ack_failed", { agentId: this.#config.agentId, eventId: message.eventId, error });
+      });
     return this.#queue.run(lane, async () => {
+      await queuedAck;
       let existing = this.#registry.getConversation(key);
       const humanClaimingManagerOwnedThread = Boolean(
         existing &&
@@ -124,14 +150,6 @@ export class ChatService {
           });
         }
       }
-      const sharedManagerChannel =
-        this.#config.role === "manager" &&
-        ["channel-message", "app-mention"].includes(message.kind);
-      const sharedWorkerThread =
-        this.#config.role === "worker" &&
-        ["app-mention", "channel-message"].includes(message.kind);
-      const sharedConversation =
-        sharedManagerChannel || sharedWorkerThread || Boolean(delegation);
       if (
         existing &&
         existing.ownerUserId !== message.userId &&

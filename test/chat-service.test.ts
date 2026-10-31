@@ -17,6 +17,7 @@ function setup(
   fileUploads = false,
   role: "worker" | "manager" = "worker",
   interAgent = false,
+  transport: "rpc" | "tmux" = "rpc",
 ) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-slack-team-chat-"));
   temporaryDirectories.push(directory);
@@ -47,6 +48,7 @@ function setup(
         }
       : {}),
     pi: {
+      transport,
       cwd: directory,
       agentDir: directory,
       sessionDir: path.join(directory, "sessions"),
@@ -92,6 +94,71 @@ afterEach(() => {
 });
 
 describe("ChatService", () => {
+  it("acknowledges a tmux request in another chat before the active request completes, without replaying duplicates", async () => {
+    const { service, prompt, registry } = setup(false, "worker", false, "tmux");
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    prompt.mockImplementationOnce(async () => {
+      await gate;
+      return { text: "first", sessionFile: "/tmp/s", sessionId: "s" };
+    });
+    const firstAck = vi.fn(async () => undefined);
+    const secondAck = vi.fn(async () => undefined);
+    const accepted = vi.fn(async () => undefined);
+    const prepare = vi.fn(async () => "second");
+    const first = service.handleMessage(message(), { onQueued: firstAck });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    const secondMessage = message({ eventId: "Ev02", channelId: "D02", userId: "U02" });
+    const second = service.handleMessage(secondMessage, { onQueued: secondAck, onAccepted: accepted, preparePrompt: prepare });
+    await vi.waitFor(() => expect(secondAck).toHaveBeenCalledWith({ isObservation: false, waiting: true }));
+    expect(firstAck).toHaveBeenCalledWith({ isObservation: false, waiting: false });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(accepted).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(await service.handleMessage(secondMessage, { onQueued: secondAck })).toEqual({ type: "duplicate" });
+    expect(secondAck).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, second]);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(accepted).toHaveBeenCalledOnce();
+    registry.close();
+  });
+
+  it("keeps FIFO even when the first acknowledgement is slow", async () => {
+    const { service, prompt, registry } = setup();
+    let release!: () => void;
+    const slowAck = new Promise<void>(resolve => { release = resolve; });
+    const secondAck = vi.fn(async () => undefined);
+    const first = service.handleMessage(message({ text: "first" }), { onQueued: () => slowAck });
+    const second = service.handleMessage(message({ eventId: "Ev02", text: "second" }), { onQueued: secondAck });
+    await vi.waitFor(() => expect(secondAck).toHaveBeenCalled());
+    expect(prompt).not.toHaveBeenCalled();
+    release();
+    await Promise.all([first, second]);
+    expect(prompt.mock.calls.map(call => call[2])).toEqual(["first", "second"]);
+    registry.close();
+  });
+
+  it("continues work if the cosmetic queued acknowledgement rejects", async () => {
+    const { service, prompt, registry } = setup();
+    await expect(service.handleMessage(message(), { onQueued: async () => { throw new Error("Slack unavailable"); } })).resolves.toMatchObject({ type: "completed" });
+    expect(prompt).toHaveBeenCalledOnce();
+    registry.close();
+  });
+
+  it("never acknowledges rejected or private-owner-mismatched requests", async () => {
+    const { service, prompt, registry } = setup();
+    const onQueued = vi.fn(async () => undefined);
+    await service.handleMessage(message({ userId: "U99" }), { onQueued });
+    await service.handleMessage(message({ eventId: "Ev02", appId: "A99" }), { onQueued });
+    await service.handleMessage(message({ eventId: "Ev03", botId: "B01" }), { onQueued });
+    registry.createConversation({ teamId: "T01", appId: "A01", channelId: "D01", threadTs: "123.456" }, "U02");
+    await expect(service.handleMessage(message({ eventId: "Ev04" }), { onQueued })).resolves.toMatchObject({ type: "ignored", reason: "conversation-owner-mismatch" });
+    expect(onQueued).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+    registry.close();
+  });
+
   it("runs one prompt and deduplicates a retried Slack event", async () => {
     const { service, prompt, registry } = setup();
     await expect(service.handleMessage(message())).resolves.toMatchObject({
