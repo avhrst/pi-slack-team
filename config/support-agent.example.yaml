@@ -1,0 +1,35 @@
+version: 1
+agentId: support
+role: worker
+expectedUnixUser: support-agent
+stateDir: /home/support-agent/.local/state/pi-slack-team
+
+slack:
+  # Synthetic IDs: replace all three values for the target workspace/app/user.
+  teamId: T0000000000
+  appId: A0000000000
+  allowedUserIds:
+    - U0000000000
+  progressMode: informative
+
+interAgent:
+  peers:
+    - agentId: dev
+      role: manager
+      appId: A00000000000
+      botUserId: U00000000000
+
+pi:
+  provider: openai-codex
+  model: gpt-6.1-sol
+  thinkingLevel: xhigh
+  command: /usr/bin/pi
+  cwd: /home/support-agent/ms-support
+  agentDir: /home/support-agent/.pi/agent
+  sessionDir: /home/support-agent/.pi/agent/sessions
+  maxActiveSessions: 1
+  idleTimeoutMs: 300000
+
+# Production credentials are loaded from systemd:
+#   $CREDENTIALS_DIRECTORY/slack_bot_token
+#   $CREDENTIALS_DIRECTORY/slack_app_token

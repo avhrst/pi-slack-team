@@ -212,6 +212,19 @@ describe("agent config", () => {
     }
   });
 
+  it("keeps specialized team examples on the explicit model and output baseline", () => {
+    for (const agent of ["dev", "deploy", "msboard", "support"]) {
+      const config = loadConfig(path.resolve(`config/${agent}-agent.example.yaml`));
+      expect(config.agentId).toBe(agent);
+      expect(config.pi).toMatchObject({
+        provider: "openai-codex",
+        model: "gpt-6.1-sol",
+        thinkingLevel: "xhigh",
+      });
+      expect(config.slack.progressMode).toBe("informative");
+    }
+  });
+
   it("requires at least one allowed Slack user", () => {
     const input = structuredClone(validConfig());
     input.slack.allowedUserIds = [];

@@ -11,7 +11,7 @@ slack:
   # Manager observations remain restricted to explicitly authorized humans.
   allowedUserIds:
     - U0000000000
-  progressMode: console
+  progressMode: informative
 
 # Replace each synthetic peer identity and configure the reciprocal dev peer on
 # that worker before enabling delegation.
@@ -31,6 +31,9 @@ interAgent:
       botUserId: U0000000000000
 
 pi:
+  provider: openai-codex
+  model: gpt-6.1-sol
+  thinkingLevel: xhigh
   command: /usr/bin/pi
   cwd: /home/dev-agent
   agentDir: /home/dev-agent/.pi/agent

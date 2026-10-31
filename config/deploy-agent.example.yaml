@@ -10,7 +10,7 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: console
+  progressMode: informative
   # Requires the files:read scope included in manifests/deploy-agent.yaml.
   fileUploads: true
   maxFileBytes: 20971520
@@ -24,6 +24,9 @@ interAgent:
       botUserId: U00000000000
 
 pi:
+  provider: openai-codex
+  model: gpt-6.1-sol
+  thinkingLevel: xhigh
   command: /usr/bin/pi
   cwd: /home/deploy-agent/ms-app-update
   agentDir: /home/deploy-agent/.pi/agent

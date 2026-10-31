@@ -10,7 +10,7 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: console
+  progressMode: informative
   fileUploads: false
   maxFileBytes: 20971520
   maxFilesPerMessage: 5
@@ -24,6 +24,9 @@ interAgent:
       botUserId: U00000000000
 
 pi:
+  provider: openai-codex
+  model: gpt-6.1-sol
+  thinkingLevel: xhigh
   command: /usr/bin/pi
   cwd: /home/msboard-agent/ms-dashboard
   agentDir: /home/msboard-agent/.pi/agent
