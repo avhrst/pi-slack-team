@@ -1,9 +1,42 @@
-import type { AgentConfig } from "../config/schema.js";
+import { compactProgressText } from "../pi/activity-progress.js";
 import type { RpcRecord } from "../pi/rpc-client.js";
 import type { Registry } from "../storage/registry.js";
 import type { DelegationContext, DelegationOutput, DelegationPresenter } from "../tmux/protocol.js";
 import { SlackConsoleReporter, type SlackDeliveryQueue, type ConsoleDelivery, type ConsoleReporterState } from "./console-reporter.js";
-import { PiProgressTranscript } from "./pi-progress.js";
+import type { ConsoleEntry } from "./console-transcript.js";
+import { renderSlackWorkProgress, SlackWorkProgress, type SlackWorkStep } from "./live-thread-reporter.js";
+import { escapeSlackText } from "./mrkdwn.js";
+
+const WORKER_FAILED = "🛑 Профільний агент не завершив завдання.";
+const WORKER_COMPLETE = "✅ Профільний агент завершив завдання.";
+
+function projectStep(id: string, step: SlackWorkStep): Extract<ConsoleEntry, { kind: "public-step" }> {
+  return { id, kind: "public-step", step, text: renderSlackWorkProgress(step) };
+}
+
+function migrateConsole(state: ConsoleReporterState, progress: SlackWorkProgress, stage: Publication["stage"], finalText?: string): ConsoleReporterState {
+  const entries = state.transcript.entries.flatMap((entry): ConsoleEntry[] => {
+    const isFinal = entry.kind !== "tool" && entry.text.trim() === finalText?.trim();
+    if (entry.kind === "status") {
+      return [{ ...entry, text: stage === "failed" && isFinal ? WORKER_FAILED : compactProgressText(entry.text) }];
+    }
+    if (entry.kind === "assistant") return stage === "completed" && isFinal ? [entry] : [];
+    if (entry.kind === "public-step") return [entry];
+    const step = progress.record({
+      type: entry.state === "running" ? "tool_execution_update" : "tool_execution_end",
+      toolCallId: entry.id.slice(5), toolName: entry.name, isError: entry.state === "failed",
+      result: { content: [{ type: "text", text: entry.output }] },
+      partialResult: { content: [{ type: "text", text: entry.output }] },
+    });
+    return step?.kind === "step" ? [projectStep(entry.id, step)] : [];
+  });
+  return {
+    transcript: { entries, sequence: state.transcript.sequence, delegatedTools: [] },
+    // Keep Slack IDs and pending receipts for reconciliation; stop storing old payloads.
+    posted: state.posted.map(([id, item]) => [id, { ts: item.ts, text: "" }]),
+    pending: state.pending,
+  };
+}
 
 interface Publication {
   context: DelegationContext;
@@ -17,6 +50,7 @@ interface Publication {
   headerPending?: boolean;
   headerText?: string;
   console?: ConsoleReporterState;
+  publicJournal?: true;
   deliveryFailed?: boolean;
   finalText?: string;
   settled?: boolean;
@@ -26,8 +60,7 @@ interface LivePublication {
   state: Publication;
   reporter: SlackConsoleReporter;
   writes: Promise<void>;
-  progress: PiProgressTranscript;
-  refreshQueued: boolean;
+  progress: SlackWorkProgress;
   finishing?: Promise<boolean>;
 }
 
@@ -35,7 +68,6 @@ interface LivePublication {
 export class SlackDelegationPublisher implements DelegationPresenter {
   readonly #live = new Map<string, LivePublication>();
   constructor(
-    readonly config: AgentConfig,
     readonly registry: Registry,
     readonly queue: SlackDeliveryQueue,
     readonly delivery: (channel: string, thread: string) => ConsoleDelivery,
@@ -60,10 +92,17 @@ export class SlackDelegationPublisher implements DelegationPresenter {
     if (context.origin.kind !== "slack") throw new Error("Slack publication requires Slack origin");
     const origin = context.origin;
     const target = this.delivery(origin.channelId, origin.threadTs);
-    const label = proxy ? `*Worker ${context.workerId}*\n` : "";
+    const label = proxy ? `🤖 *Профільний агент ${context.workerId}*\n` : "";
+    const progress = new SlackWorkProgress();
+    if (state.reason) state.reason = compactProgressText(state.reason);
+    if (state.console && !state.publicJournal) {
+      state.console = migrateConsole(state.console, progress, state.stage, state.finalText);
+      if (state.stage === "failed") state.finalText = WORKER_FAILED;
+      if (state.headerText) state.headerText = "";
+    }
+    state.publicJournal = true;
     const live: LivePublication = {
-      state, writes: Promise.resolve(), refreshQueued: false,
-      progress: new PiProgressTranscript(this.config.slack.progressMode === "console" ? "summary" : this.config.slack.progressMode),
+      state, writes: Promise.resolve(), progress,
       reporter: new SlackConsoleReporter(this.queue, {
         post: text => target.post(label + text), update: (ts, text) => target.update(ts, label + text), remove: ts => target.remove(ts),
       }, error => { state.deliveryFailed = true; this.#save(live); this.onError(error); }, {
@@ -81,11 +120,12 @@ export class SlackDelegationPublisher implements DelegationPresenter {
       const { state } = live;
       if (state.context.origin.kind !== "slack" || state.deliveryFailed) return;
       const target = this.delivery(state.context.origin.channelId, state.context.origin.threadTs);
-      const label = state.proxy ? `*Worker ${state.context.workerId}*\n` : "";
-      const status = initial || state.stage === "queued" ? "Отримав завдання від менеджера. Очікую черги."
-        : state.stage === "running" ? "Виконую." : state.stage === "completed" ? "Завдання завершено." : "Виконання перервано; вже виконані дії не скасовано.";
-      const text = label + status + (state.reason ? `\n${state.reason}` : "") +
-        (state.stage === "running" && this.config.slack.progressMode !== "console" ? `\n${live.progress.render("working")}` : "");
+      const label = state.proxy ? `🤖 *Профільний агент ${state.context.workerId}*\n` : "";
+      const status = initial || state.stage === "queued" ? "⏳ Отримав завдання від менеджера. Очікую черги."
+        : state.stage === "running" ? "🔄 Виконую."
+          : state.stage === "completed" ? "✅ Завдання завершено." : "🛑 Виконання перервано. Уже виконані дії залишаються чинними.";
+      const reason = state.reason && compactProgressText(state.reason);
+      const text = label + status + (reason ? `\n${escapeSlackText(reason)}` : "");
       if (state.headerTs && state.headerText === text) return;
       if (state.headerTs) await this.queue.send("update", () => target.update(state.headerTs!, text));
       else {
@@ -104,13 +144,13 @@ export class SlackDelegationPublisher implements DelegationPresenter {
 
   async begin(context: DelegationContext): Promise<{ route: "worker" | "manager"; reason?: string }> {
     const dm = context.origin.kind === "slack" && context.origin.channelId.startsWith("D");
-    const live = this.#open(context, false, dm ? "manager" : "worker", dm ? "У DM стрічку worker показує менеджер." : undefined);
+    const live = this.#open(context, false, dm ? "manager" : "worker", dm ? "У DM стрічку профільного агента показує менеджер." : undefined);
     if (live.state.route === "worker") {
       try { if (!live.state.headerTs) await this.#header(live, true); }
       catch {
         // No access or an uncertain initial acknowledgement: switch once, never invite/repost.
         live.state.route = "manager";
-        live.state.reason = "Worker не зміг підтвердити доставку в канал. Його стрічку показує менеджер.";
+        live.state.reason = "Доставку в канал не підтверджено. Стрічку профільного агента показує менеджер.";
         this.#save(live);
       }
     }
@@ -132,16 +172,16 @@ export class SlackDelegationPublisher implements DelegationPresenter {
       live.state.stage = "running";
       void this.#header(live).catch(error => { live.state.deliveryFailed = true; this.#save(live); this.onError(error); });
     }
-    if (this.config.slack.progressMode === "console") live.reporter.record(event);
-    else if (live.progress.record(event) && live.state.stage === "running") {
-      // At most one queued header refresh; re-read the latest transcript on delivery.
-      if (!live.refreshQueued) {
-        live.refreshQueued = true;
-        void live.writes.then(() => { live.refreshQueued = false; return this.#header(live); }).catch(error => {
-          live.state.deliveryFailed = true; this.#save(live); this.onError(error);
-        });
-      }
+    const entry = live.progress.record(event);
+    if (entry?.kind === "note") live.reporter.record({ type: "public_notice", text: entry.text });
+    else if (entry?.kind === "step" && typeof event.toolCallId === "string") {
+      this.#recordStep(live, `tool-${event.toolCallId}`, entry);
     }
+  }
+
+  #recordStep(live: LivePublication, id: string, step: SlackWorkStep): void {
+    const projected = projectStep(id, step);
+    live.reporter.record({ type: "slack_public_step", id, step, text: projected.text });
   }
 
   #finish(live: LivePublication, ok: boolean, text: string): Promise<boolean> {
@@ -152,13 +192,18 @@ export class SlackDelegationPublisher implements DelegationPresenter {
   async #finishOnce(live: LivePublication, ok: boolean, text: string): Promise<boolean> {
     if (live.state.settled) return !live.state.deliveryFailed;
     live.state.stage = ok ? "completed" : "failed";
-    live.state.finalText = text;
+    live.state.finalText = ok ? text : WORKER_FAILED;
     this.#save(live);
     await live.writes;
     if (!live.state.deliveryFailed) {
       try {
+        for (const entry of live.state.console?.transcript.entries ?? []) {
+          if (entry.kind !== "public-step" || entry.step.status !== "in_progress") continue;
+          this.#recordStep(live, entry.id, { ...entry.step, status: "error",
+            detail: [entry.step.detail, "Завершення кроку не підтверджено."].filter(Boolean).join("\n") });
+        }
         if (ok) await live.reporter.complete(text);
-        else await live.reporter.fail(text);
+        else await live.reporter.fail(WORKER_FAILED);
         await this.#header(live);
       } catch (error) { live.state.deliveryFailed = true; this.onError(error); }
     }
@@ -172,7 +217,7 @@ export class SlackDelegationPublisher implements DelegationPresenter {
     const live = this.#open(context, false, "worker");
     if (live.state.route === "manager") {
       live.state.stage = ok ? "completed" : "failed";
-      live.state.finalText = text;
+      live.state.finalText = ok ? text : WORKER_FAILED;
       live.state.settled = true;
       this.#save(live);
       return true;
@@ -195,7 +240,7 @@ export class SlackDelegationPublisher implements DelegationPresenter {
       if (item.event.type === "delegation_end") {
         // Completion is durable before acknowledging the packet. Delivery may lag Pi.
         live.state.stage = item.event.ok ? "completed" : "failed";
-        live.state.finalText = typeof item.event.text === "string" ? item.event.text : "Worker finished.";
+        live.state.finalText = item.event.ok ? (typeof item.event.text === "string" ? item.event.text : WORKER_COMPLETE) : WORKER_FAILED;
         void this.#finish(live, Boolean(item.event.ok), live.state.finalText);
       } else this.#record(live, item.event);
       this.#save(live);
@@ -206,7 +251,7 @@ export class SlackDelegationPublisher implements DelegationPresenter {
     let delivered = true;
     for (const [id, live] of this.#live) if (live.state.proxy && live.state.context.parentRunId === parentRunId) {
       await live.writes;
-      if (!await this.#finish(live, live.state.stage === "completed", live.state.finalText ?? "Parent request stopped; worker actions were not replayed.")) delivered = false;
+      if (!await this.#finish(live, live.state.stage === "completed", live.state.finalText ?? WORKER_COMPLETE)) delivered = false;
       live.state.parentFinished = true;
       this.#save(live);
       await live.reporter.close();
@@ -221,8 +266,7 @@ export class SlackDelegationPublisher implements DelegationPresenter {
       if (state.route !== "worker" && !state.proxy) continue;
       if (state.settled) continue;
       const live = this.#open(state.context, state.proxy, state.route, state.reason);
-      const terminal = state.stage === "completed" || state.stage === "failed";
-      await this.#finish(live, terminal && state.stage === "completed", terminal ? state.finalText ?? "Worker finished." : "Bridge restarted; interrupted work was not replayed.");
+      await this.#finish(live, state.stage === "completed", state.finalText ?? WORKER_COMPLETE);
     }
   }
 

@@ -18,6 +18,13 @@ export interface ConversationKey {
   threadTs: string;
 }
 
+export interface SlackWorkThread {
+  sourceThreadTs: string;
+  sourceEventId: string;
+  workThreadTs: string;
+  topic: string;
+}
+
 export interface ConversationRecord extends ConversationKey {
   ownerUserId: string;
   sessionKey: string;
@@ -147,6 +154,19 @@ export class Registry {
         engaged INTEGER NOT NULL DEFAULT 0 CHECK (engaged IN (0, 1)),
         context_ts TEXT,
         PRIMARY KEY (team_id, app_id, channel_id, thread_ts)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS slack_work_threads (
+        team_id TEXT NOT NULL,
+        app_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        source_thread_ts TEXT NOT NULL,
+        source_event_id TEXT NOT NULL UNIQUE,
+        work_thread_ts TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        PRIMARY KEY (team_id, app_id, channel_id, source_thread_ts),
+        UNIQUE (team_id, app_id, channel_id, work_thread_ts),
+        CHECK (source_thread_ts <> work_thread_ts)
       ) STRICT;
 
       CREATE TABLE IF NOT EXISTS slack_publications (
@@ -343,6 +363,28 @@ export class Registry {
   publications<T>(): Array<{ id: string; state: T }> {
     return (this.#statement("SELECT publication_id, state_json FROM slack_publications").all() as Array<{ publication_id: string; state_json: string }>)
       .map(row => ({ id: row.publication_id, state: JSON.parse(row.state_json) as T }));
+  }
+
+  slackWorkThread(key: ConversationKey): SlackWorkThread | undefined {
+    return this.#statement(`
+      SELECT source_thread_ts AS sourceThreadTs, source_event_id AS sourceEventId,
+             work_thread_ts AS workThreadTs, topic
+        FROM slack_work_threads
+       WHERE team_id = ? AND app_id = ? AND channel_id = ?
+         AND (source_thread_ts = ? OR work_thread_ts = ?)
+    `).get(key.teamId, key.appId, key.channelId, key.threadTs, key.threadTs) as
+      SlackWorkThread | undefined;
+  }
+
+  bindSlackWorkThread(source: ConversationKey, sourceEventId: string, workThreadTs: string, topic: string): SlackWorkThread {
+    this.#transaction(() => {
+      this.#statement(`INSERT INTO slack_work_threads (
+        team_id, app_id, channel_id, source_thread_ts, source_event_id, work_thread_ts, topic
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(source.teamId, source.appId, source.channelId, source.threadTs, sourceEventId, workThreadTs, topic);
+      this.engageThread({ ...source, threadTs: workThreadTs });
+    });
+    return { sourceThreadTs: source.threadTs, sourceEventId, workThreadTs, topic };
   }
 
   threadState(key: ConversationKey): { engaged: boolean; contextTs?: string } {

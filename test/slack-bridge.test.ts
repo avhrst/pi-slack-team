@@ -5,18 +5,18 @@ import path from "node:path";
 import { agentConfigSchema, type AgentConfig } from "../src/config/schema.js";
 import type { InterAgentGateway } from "../src/inter-agent/gateway.js";
 import type { Logger } from "../src/observability/logger.js";
-import { ChatService, type MessageHooks, type PiPromptRunner } from "../src/routing/chat-service.js";
-import type { IncomingSlackMessage } from "../src/routing/chat-key.js";
+import { ChatService, type PiPromptRunner } from "../src/routing/chat-service.js";
 import { Registry } from "../src/storage/registry.js";
-import type { ProgressMode } from "../src/slack/pi-progress.js";
 
 const slack = vi.hoisted(() => ({
   listeners: new Map<string, (args: Record<string, unknown>) => Promise<void>>(),
-  postMessage: vi.fn(),
+  post: vi.fn(),
   update: vi.fn(),
-  progressUpdate: vi.fn(),
-  progressPost: vi.fn(),
-  progressDelete: vi.fn(),
+  delete: vi.fn(),
+  apiCall: vi.fn(),
+  startStream: vi.fn(),
+  appendStream: vi.fn(),
+  getPermalink: vi.fn(),
   replies: vi.fn(),
 }));
 
@@ -27,7 +27,7 @@ vi.mock("@slack/bolt", () => ({
   },
   App: class {
     client = {
-      chat: { postMessage: slack.postMessage, update: slack.update },
+      chat: { postMessage: slack.post, update: slack.update },
       auth: { test: async () => ({ team_id: "T01", user_id: "UBOT" }) },
       conversations: { replies: slack.replies },
     };
@@ -42,423 +42,262 @@ vi.mock("@slack/bolt", () => ({
 
 vi.mock("@slack/web-api", () => ({
   WebClient: class {
-    chat = { update: slack.progressUpdate, postMessage: slack.progressPost, delete: slack.progressDelete };
+    apiCall = slack.apiCall;
+    chat = {
+      postMessage: slack.post, update: slack.update, delete: slack.delete,
+      getPermalink: slack.getPermalink, startStream: slack.startStream, appendStream: slack.appendStream,
+    };
   },
 }));
 
 const { SlackBridge } = await import("../src/slack/slack-bridge.js");
-
-const config = agentConfigSchema.parse({
-  version: 1,
-  agentId: "deploy",
-  expectedUnixUser: "deploy-agent",
-  stateDir: "/tmp/pi-slack-bridge-test",
-  slack: { teamId: "T01", appId: "A01", allowedUserIds: ["U01"], progressMode: "summary" },
+const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
+const baseConfig = {
+  version: 1, agentId: "deploy", expectedUnixUser: "deploy-agent",
+  slack: { teamId: "T01", appId: "A01", allowedUserIds: ["U01"] },
   pi: { cwd: "/tmp", agentDir: "/tmp", sessionDir: "/tmp/sessions" },
-});
+};
+const peers = {
+  peers: [{ agentId: "manager", role: "manager", appId: "A02", botUserId: "UMANAGER" }],
+  requestTimeoutMs: 60_000, maxTaskChars: 30_000, maxResponseChars: 50_000,
+};
+const client = { chat: { postMessage: slack.post, update: slack.update }, conversations: { replies: slack.replies } };
+const cleanup: Array<() => void | Promise<void>> = [];
 
-const logger: Logger = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-} as unknown as Logger;
-
-function bridge(handle: (hooks: MessageHooks) => Promise<string>, settings: AgentConfig | ProgressMode = config) {
-  const chatService = {
-    claimEvent: () => true,
-    handleMessage: async (_message: IncomingSlackMessage, hooks: MessageHooks) => {
-      await hooks.onAccepted?.();
-      const result = { text: await handle(hooks), sessionFile: "/tmp/s", sessionId: "s" };
-      return { type: "completed" as const, result };
-    },
-  } as unknown as ChatService;
-  const interAgent = {
-    setSlackSender: vi.fn(),
-    parseResponse: () => undefined,
-    isTrustedManagerUser: () => false,
+async function setup(prompt: PiPromptRunner["prompt"], overrides: Partial<AgentConfig> = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pst-work-thread-"));
+  const settings = agentConfigSchema.parse({ ...baseConfig, stateDir: directory, ...overrides });
+  const registry = new Registry(path.join(directory, "state.sqlite"));
+  const gateway = {
+    setSlackSender: vi.fn(), parseResponse: () => undefined, isTrustedManagerUser: () => false,
   } as unknown as InterAgentGateway;
-  return new SlackBridge(
-    typeof settings === "string" ? { ...config, slack: { ...config.slack, progressMode: settings } } : settings,
-    { botToken: "xoxb-test", appToken: "xapp-test" },
-    chatService,
-    interAgent,
-    logger,
-    () => undefined,
-  );
+  const bridge = new SlackBridge(settings, { botToken: "xoxb-test", appToken: "xapp-test" },
+    new ChatService(settings, registry, { prompt }, logger), gateway, logger, () => undefined, registry);
+  cleanup.push(async () => {
+    await bridge.stop();
+    registry.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  await bridge.start();
+  return { bridge, registry };
 }
 
-async function directMessage(): Promise<void> {
-  const listener = slack.listeners.get("message");
-  if (!listener) throw new Error("message listener was not registered");
-  await listener({
-    body: { event_id: "Ev01", team_id: "T01", api_app_id: "A01" },
-    event: { channel: "D01", channel_type: "im", user: "U01", ts: "1.1", text: "deploy" },
-    client: { chat: { postMessage: slack.postMessage, update: slack.update } },
+function route(listener: "message" | "app_mention", eventId: string, event: Record<string, unknown> = {}) {
+  return slack.listeners.get(listener)!({
+    body: { event_id: eventId, team_id: "T01", api_app_id: "A01" },
+    event: { channel: "D01", channel_type: "im", user: "U01", ts: "1.1", text: "Перевірка", ...event },
+    client,
   });
 }
 
+async function delivered(action: Promise<void>) {
+  await vi.advanceTimersByTimeAsync(40_000);
+  await action;
+}
+
+function result(text: string) { return { text, sessionFile: "/tmp/s", sessionId: "s" }; }
+
 beforeEach(() => {
+  vi.useFakeTimers();
+  let postCount = 0;
+  slack.post.mockImplementation(async () => ({ ok: true, ts: `2.${++postCount}` }));
   slack.update.mockResolvedValue({ ok: true });
-  slack.progressUpdate.mockResolvedValue({ ok: true });
+  slack.startStream.mockResolvedValue({ ok: true, ts: "3.1" });
+  slack.appendStream.mockResolvedValue({ ok: true });
+  slack.apiCall.mockImplementation(async (_method, args) => ({ ok: true, title: args.title }));
+  slack.getPermalink.mockResolvedValue({ ok: true, permalink: "https://workspace.slack.com/archives/D01/p21?thread_ts=2.1&cid=D01" });
   slack.replies.mockResolvedValue({ ok: true, messages: [] });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close();
   slack.listeners.clear();
   vi.resetAllMocks();
+  vi.useRealTimers();
 });
 
-describe("immediate queue acknowledgement", () => {
-  it.each(["console", "informative"] as const)("posts one early %s acknowledgement while the first real lane is blocked", async mode => {
-    vi.useFakeTimers();
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-queue-ack-"));
-    const registry = new Registry(path.join(directory, "state.sqlite"));
-    const settings = agentConfigSchema.parse({ ...config, stateDir: directory,
-      slack: { ...config.slack, progressMode: mode }, pi: { ...config.pi, transport: "tmux" } });
-    const posts: Array<{ text: string; ts: string }> = [];
-    const post = async ({ text }: { text: string }) => {
-      const ts = `post-${posts.length + 1}`; posts.push({ text, ts }); return { ts };
-    };
-    slack.postMessage.mockImplementation(post);
-    slack.progressPost.mockImplementation(post);
+describe("Slack work threads", () => {
+  it("creates one bot root, streams public commentary and posts the final once", async () => {
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (_key, _owner, _text, onEvent) => {
+      onEvent?.({ type: "agent_progress", text: "Перевіряю налаштування." });
+      onEvent?.({ type: "tool_execution_start", toolName: "read", toolCallId: "tool", args: { path: "PRIVATE_PATH" } });
+      onEvent?.({ type: "tool_execution_end", toolName: "read", toolCallId: "tool", result: { content: [{ type: "text", text: "PRIVATE_OUTPUT" }] } });
+      return result("Результат перевірки.");
+    });
+    await setup(prompt);
+    const channel = { channel: "C01", channel_type: "channel", text: "<@UBOT> Перевірка" };
+    const initial = route("app_mention", "First", channel);
+    await route("app_mention", "First", channel);
+    await route("app_mention", "Unauthorized", { ...channel, user: "U99" });
+    await delivered(initial);
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt.mock.calls[0]?.[0]).toMatchObject({ channelId: "C01", threadTs: "2.1" });
+    const posts = slack.post.mock.calls.map(([payload]) => payload);
+    expect(posts.filter(payload => payload.thread_ts === undefined)).toEqual([expect.objectContaining({ text: "🔄 Перевірка · У роботі" })]);
+    expect(posts).toContainEqual(expect.objectContaining({ thread_ts: "1.1", text: expect.stringContaining("🧵") }));
+    expect(posts.filter(payload => payload.text === "Результат перевірки.")).toEqual([expect.objectContaining({ thread_ts: "2.1" })]);
+    expect(slack.apiCall).toHaveBeenCalledWith("agents.sessions.setStatus", expect.objectContaining({
+      channel_id: "C01", thread_ts: "2.1", initiator_user_id: "U01", status: "processing",
+    }));
+    expect(slack.startStream).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "C01", thread_ts: "2.1", recipient_team_id: "T01", recipient_user_id: "U01",
+      chunks: [expect.objectContaining({ text: "💬 Перевіряю налаштування." })],
+    }));
+    expect(slack.update).toHaveBeenCalledWith(expect.objectContaining({
+      ts: "2.1", text: expect.stringMatching(/^✅ .*Кроків виконано: 1/u),
+    }));
+    expect(JSON.stringify(slack.post.mock.calls)).not.toMatch(/PRIVATE_PATH|PRIVATE_OUTPUT/u);
+  });
+
+  it("acknowledges queued follow-ups early and keeps the original title and thread", async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (key, owner, text, onEvent) => {
-      expect(key.channelId).toBe("D01");
-      expect(owner).toBe("U01");
-      onEvent?.({ type: "agent_start" });
-      if (text === "first") await gate;
-      return { text: text === "first" ? "First result" : "Second result", sessionFile: "/tmp/s", sessionId: "s" };
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (_key, _owner, text) => {
+      if (text.includes("Перевірка")) await gate;
+      return result(text.includes("Перевірка") ? "Перша відповідь." : "Друга відповідь.");
     });
-    const service = new ChatService(settings, registry, { prompt }, logger);
-    const interAgent = { setSlackSender: vi.fn(), parseResponse: () => undefined, isTrustedManagerUser: () => false } as unknown as InterAgentGateway;
-    const runtime = new SlackBridge(settings, { botToken: "xoxb-test", appToken: "xapp-test" }, service, interAgent, logger, () => undefined);
-    const route = (id: string, text: string, user = "U01") => slack.listeners.get("message")!({
-      body: { event_id: id, team_id: "T01", api_app_id: "A01" },
-      event: { channel: "D01", channel_type: "im", user, ts: text === "first" ? "1.1" : "1.2", text },
-      client: { chat: { postMessage: slack.postMessage, update: slack.update } },
-    });
-    try {
-      const first = route("EvFirst", "first");
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(prompt).toHaveBeenCalledTimes(1);
-      const second = route("EvSecond", "second");
-      await vi.advanceTimersByTimeAsync(5_000);
-      const notice = posts.filter(p => p.text.includes("Запит отримано й поставлено в чергу"));
-      expect(notice).toHaveLength(1);
-      expect(notice[0]?.text).toContain("попередній запит");
-      expect(prompt).toHaveBeenCalledTimes(1);
-      await route("EvSecond", "second");
-      await route("EvUnauthorized", "second", "U99");
-      expect(posts.filter(p => p.text.includes("Запит отримано й поставлено в чергу"))).toHaveLength(1);
-      release();
-      await vi.advanceTimersByTimeAsync(30_000);
-      await Promise.all([first, second]);
-      expect(prompt).toHaveBeenCalledTimes(2);
-      expect(posts.filter(p => p.text.includes("Запит отримано й поставлено в чергу"))).toHaveLength(1);
-      expect(slack.progressUpdate.mock.calls.some(([call]) => (call as { ts: string }).ts === notice[0]?.ts)).toBe(true);
-    } finally {
-      release();
-      await runtime.stop();
-      registry.close();
-      fs.rmSync(directory, { recursive: true, force: true });
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("SlackBridge response delivery", () => {
-  it("streams delegated work but posts the final answer only in its correlated response", async () => {
-    vi.useFakeTimers();
-    const messages = new Map<string, string>();
-    slack.progressPost.mockImplementation(async ({ text }: { text: string }) => {
-      const ts = String(messages.size + 1);
-      messages.set(ts, text);
-      return { ts };
-    });
-    slack.progressUpdate.mockImplementation(async ({ ts, text }: { ts: string; text: string }) => { messages.set(ts, text); return { ok: true }; });
-    slack.progressDelete.mockImplementation(async ({ ts }: { ts: string }) => { messages.delete(ts); return { ok: true }; });
-    const runtime = bridge(async (hooks) => {
-      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Checking." }] } });
-      hooks.onPiEvent?.({ type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: { path: "/tmp/report" } });
-      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "tool", result: { content: [{ type: "text", text: "ok" }] } });
-      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Final delegated answer." }] } });
-      return "Final delegated answer.";
-    }, {
-      ...config, slack: { ...config.slack, progressMode: "console" },
-      interAgent: { peers: [{ agentId: "manager", role: "manager", appId: "A02", botUserId: "UMANAGER" }],
-        requestTimeoutMs: 60_000, maxTaskChars: 30_000, maxResponseChars: 50_000 },
-    });
-    try {
-      await runtime.start();
-      const handling = slack.listeners.get("app_mention")!({
-        body: { event_id: "EvDelegate", team_id: "T01", api_app_id: "A01" },
-        event: { channel: "C01", channel_type: "channel", user: "UMANAGER", bot_id: "BMANAGER", app_id: "A02",
-          ts: "1.3", thread_ts: "1.1", text: "<@UBOT> [pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nInspect report" },
-        client: { chat: { postMessage: slack.postMessage, update: slack.update } },
-      });
-      await vi.advanceTimersByTimeAsync(15_000);
-      await handling;
-      const visible = [...messages.values()];
-      expect(visible).toHaveLength(3);
-      expect(visible[0]).toBe("Checking.");
-      expect(visible[1]).toContain("ok");
-      expect(visible[2]).toContain("<@UMANAGER>");
-      expect(visible[2]).toContain("[pi-slack-team:v1:response:123e4567-e89b-12d3-a456-426614174000");
-      expect(visible[2]).toContain("Final delegated answer.");
-      expect(visible.filter((text) => text.includes("Final delegated answer."))).toHaveLength(1);
-      expect(slack.postMessage).not.toHaveBeenCalled();
-    } finally {
-      await runtime.stop();
-      vi.useRealTimers();
-    }
+    await setup(prompt);
+    const first = route("message", "First");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    const next = route("message", "Second", { thread_ts: "2.1", ts: "2.9", text: "Уточнення" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(slack.post).toHaveBeenCalledWith(expect.objectContaining({
+      thread_ts: "2.1", text: expect.stringContaining("⏳ Уточнення"),
+    }));
+    release();
+    await delivered(Promise.all([first, next]).then(() => undefined));
+    expect(prompt.mock.calls.map(([key]) => key.threadTs)).toEqual(["2.1", "2.1"]);
+    expect(slack.post.mock.calls.filter(([payload]) => !payload.thread_ts)).toHaveLength(1);
+    expect(slack.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      ts: "2.1", text: "✅ Перевірка · Завершено",
+    }));
   });
 
-  it("delivers the default console as a persistent sequence without a second final answer", async () => {
-    vi.useFakeTimers();
-    const messages = new Map<string, string>();
-    slack.progressPost.mockImplementation(async ({ text }: { text: string }) => {
-      const ts = String(messages.size + 1);
-      messages.set(ts, text);
-      return { ts };
-    });
-    slack.progressUpdate.mockImplementation(async ({ ts, text }: { ts: string; text: string }) => { messages.set(ts, text); return { ok: true }; });
-    const runtime = bridge(async (hooks) => {
-      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Checking." }] } });
-      hooks.onPiEvent?.({ type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: { path: "/tmp/report" } });
-      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "tool", result: { content: [{ type: "text", text: "ok" }] } });
-      hooks.onPiEvent?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } });
-      return "Done.";
-    }, { ...config, slack: { ...config.slack, progressMode: "console" } });
-    try {
-      const handling = directMessage();
-      await vi.advanceTimersByTimeAsync(10_000);
-      await handling;
-      expect([...messages.values()]).toEqual(["Checking.", expect.stringContaining("ok"), "Done."]);
-      expect(slack.postMessage).not.toHaveBeenCalled();
-      expect(logger.error).not.toHaveBeenCalledWith("slack_message_failed", expect.anything());
-    } finally {
-      await runtime.stop();
-      vi.useRealTimers();
-    }
-  });
-
-  it.each([false, true])("routes a plain reply into a Pi dialog before queued work (delegation queued: %s)", async (delegationQueued) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pst-bridge-dialog-"));
-    const registry = new Registry(path.join(root, "state.sqlite"));
-    const settings = { ...config, stateDir: root,
-      interAgent: { peers: [{ agentId: "manager", role: "manager" as const, appId: "A02", botUserId: "UMANAGER" }],
-        requestTimeoutMs: 60_000, maxTaskChars: 30_000, maxResponseChars: 50_000 },
-    };
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    slack.postMessage.mockResolvedValue({ ts: "posted" });
-    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (key, owner, _text, _onEvent, _shared, sender) => {
-      if (sender === "UMANAGER") return { text: "Delegated result.", sessionFile: path.join(root, "session.jsonl"), sessionId: "session" };
-      registry.createConversation(key, owner);
-      await gate;
+  it("routes a Pi confirmation through the new thread before queued work", async () => {
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (key, owner) => {
+      if (key.channelId !== "C01") return result("Інший запит.");
       const response = await runtime.handlePiUiRequest({
-        conversation: { ...registry.getConversation(key)!, ownerUserId: sender ?? owner },
-        request: { type: "extension_ui_request", method: "confirm", id: "dialog", title: "Continue?" },
+        conversation: { ...key, ownerUserId: owner, sessionKey: "", status: "running",
+          createdAt: "", lastActivityAt: "", piSessionFile: null, piSessionId: null },
+        request: { type: "extension_ui_request", method: "confirm", id: "dialog", title: "Продовжити?" },
         signal: new AbortController().signal,
       });
       expect(response).toEqual({ confirmed: true });
-      registry.setSession(key, path.join(root, "session.jsonl"), "session");
-      return { text: "Confirmed.", sessionFile: path.join(root, "session.jsonl"), sessionId: "session" };
+      return result("Підтверджено.");
     });
-    const runtime = new SlackBridge(settings, { botToken: "xoxb-test", appToken: "xapp-test" },
-      new ChatService(settings, registry, { prompt }, logger), {
-        setSlackSender: vi.fn(), parseResponse: () => undefined, isTrustedManagerUser: () => false,
-      } as unknown as InterAgentGateway, logger, () => undefined);
-    try {
-      await runtime.start();
-      const client = { chat: { postMessage: slack.postMessage, update: slack.update }, conversations: { replies: slack.replies } };
-      const handling = slack.listeners.get("app_mention")!({
-        body: { event_id: "Ev1", team_id: "T01", api_app_id: "A01" },
-        event: { channel: "C01", user: "U01", ts: "1.1", text: "<@UBOT> start" }, client,
-      });
-      await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
-      const delegated = delegationQueued ? slack.listeners.get("app_mention")!({
-        body: { event_id: "EvDelegate", team_id: "T01", api_app_id: "A01" },
-        event: { channel: "C01", channel_type: "channel", user: "UMANAGER", bot_id: "BMANAGER", app_id: "A02",
-          ts: "1.3", thread_ts: "1.1", text: "<@UBOT> [pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nLater delegated work" }, client,
-      }) : Promise.resolve();
-      release();
-      await vi.waitFor(() => expect(slack.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("Continue?") })));
-      await slack.listeners.get("message")!({
-        body: { event_id: "Ev2", team_id: "T01", api_app_id: "A01" },
-        event: { channel: "C01", channel_type: "channel", user: "U01", ts: "1.2", thread_ts: "1.1", text: "yes" }, client,
-      });
-      await Promise.all([handling, delegated]);
-      expect(prompt).toHaveBeenCalledTimes(delegationQueued ? 2 : 1);
-      expect(slack.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Confirmed." }));
-    } finally {
-      await runtime.stop();
-      registry.close();
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+    const runtime = (await setup(prompt)).bridge;
+    const channel = { channel: "C01", channel_type: "channel" };
+    const handling = route("app_mention", "First", { ...channel, text: "<@UBOT> Перевірка" });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(slack.post).toHaveBeenCalledWith(expect.objectContaining({ thread_ts: "2.1", text: expect.stringContaining("Продовжити?") }));
+    const queued = route("message", "Other", { ...channel, thread_ts: "2.1", ts: "2.8", text: "так", user: "U99" });
+    await queued;
+    await route("message", "Answer", { ...channel, thread_ts: "2.1", ts: "2.9", text: "так" });
+    await delivered(handling);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(slack.apiCall).toHaveBeenCalledWith("agents.sessions.setStatus", expect.objectContaining({ status: "suspended" }));
+    expect(slack.post).toHaveBeenCalledWith(expect.objectContaining({ thread_ts: "2.1", text: "Підтверджено." }));
   });
 
-  it.each(["balanced", "informative"] as const)("preserves %s receipts on delivery failure without replaying work", async mode => {
-    slack.postMessage.mockResolvedValueOnce({ ts: "working-ts" }).mockRejectedValueOnce(new Error("msg_too_long"));
-    const handle = vi.fn(async (hooks: MessageHooks) => {
-      hooks.onPiEvent?.({ type: "agent_progress", text: "Локальну перевірку завершено; production не змінював." });
-      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "read", toolName: "read" });
-      return "Final answer <!channel>";
+  it("delivers a confirmation to Pi while the heading respects Slack Retry-After", async () => {
+    let limited = false;
+    slack.update.mockImplementation(async ({ text }: { text: string }) => {
+      if (!limited && text.startsWith("🟡")) {
+        limited = true;
+        throw Object.assign(new Error("rate limited"), { code: "slack_webapi_rate_limited_error", retryAfter: 30 });
+      }
+      return { ok: true };
     });
-    bridge(handle, mode);
-    await directMessage();
-    expect(handle).toHaveBeenCalledOnce();
-    expect(slack.postMessage).toHaveBeenCalledTimes(2);
-    const receipt = (slack.progressUpdate.mock.lastCall?.[0] as { text: string }).text;
-    expect(receipt).toContain("Pi завершив роботу, але Slack не прийняв частину 1 з 1");
-    expect(receipt).toContain("Локальну перевірку завершено");
-    expect(receipt).toContain("Код звернення:");
-    expect(receipt).not.toContain("Запит не завершено");
-    expect(slack.update).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith("slack_response_delivery_failed", expect.anything());
+    const answered = vi.fn();
+    const runtime = (await setup(async (key, owner) => {
+      answered(await runtime.handlePiUiRequest({
+        conversation: { ...key, ownerUserId: owner, sessionKey: "", status: "running",
+          createdAt: "", lastActivityAt: "", piSessionFile: null, piSessionId: null },
+        request: { type: "extension_ui_request", method: "confirm", id: "dialog", title: "Продовжити?" },
+        signal: new AbortController().signal,
+      }));
+      return result("Підтверджено.");
+    })).bridge;
+    const action = route("message", "First");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(limited).toBe(true);
+    await route("message", "Answer", { thread_ts: "2.1", ts: "2.9", text: "так" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answered).toHaveBeenCalledWith({ confirmed: true });
+    await delivered(action);
+  });
+
+  it("keeps worker replies in their protocol and does not publish the result twice", async () => {
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (_key, _owner, _text, onEvent) => {
+      onEvent?.({ type: "agent_progress", text: "Перевіряю." });
+      return result("Результат профільного агента.");
+    });
+    await setup(prompt, { interAgent: agentConfigSchema.parse({ ...baseConfig, stateDir: "/tmp", interAgent: peers }).interAgent! });
+    await delivered(route("app_mention", "Delegated", {
+      channel: "C01", channel_type: "channel", user: "UMANAGER", bot_id: "BMANAGER", app_id: "A02",
+      thread_ts: "1.0", text: "<@UBOT> [pi-slack-team:v1:request:123e4567-e89b-12d3-a456-426614174000]\nПеревірка",
+    }));
+    const posts = slack.post.mock.calls.map(([payload]) => payload);
+    expect(posts).toHaveLength(2);
+    expect(posts[0]).toMatchObject({ thread_ts: "1.0", text: "💬 Перевіряю." });
+    expect(posts[1].text).toContain("[pi-slack-team:v1:response:123e4567-e89b-12d3-a456-426614174000");
+    expect(posts.filter(payload => payload.text.includes("Результат профільного агента."))).toHaveLength(1);
+    expect(slack.startStream).not.toHaveBeenCalled();
+  });
+
+  it("uses the source thread for progress and final response when Slack rejects root creation", async () => {
+    slack.post.mockRejectedValueOnce(Object.assign(new Error("Slack unavailable"), { code: "slack_webapi_request_error" }));
+    await setup(async () => result("Результат у вихідному треді."));
+    await delivered(route("message", "First"));
+    expect(slack.post).toHaveBeenCalledTimes(2);
+    expect(slack.post).toHaveBeenLastCalledWith(expect.objectContaining({ thread_ts: "1.1", text: "Результат у вихідному треді." }));
+    expect(slack.apiCall).not.toHaveBeenCalled();
+  });
+
+  it("marks a delivery error separately from a Pi failure and never reruns Pi", async () => {
+    let posts = 0;
+    slack.post.mockImplementation(async (payload) => {
+      if (payload.text === "Фінальний результат.") throw new Error("ambiguous delivery");
+      return { ok: true, ts: `2.${++posts}` };
+    });
+    const prompt = vi.fn(async () => result("Фінальний результат."));
+    await setup(prompt);
+    await delivered(route("message", "First"));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(slack.post.mock.calls.filter(([payload]) => payload.text === "Фінальний результат.")).toHaveLength(1);
+    expect(slack.post).toHaveBeenCalledWith(expect.objectContaining({ thread_ts: "2.1", text: expect.stringContaining("Доставку результату в Slack перервано") }));
+    expect(slack.update).toHaveBeenLastCalledWith(expect.objectContaining({ ts: "2.1", text: expect.stringMatching(/^⚠️/u) }));
     expect(logger.error).not.toHaveBeenCalledWith("slack_message_failed", expect.anything());
   });
 
-  it.each(["balanced", "informative"] as const)("retains %s milestones for actual turn failures without leaking traces", async mode => {
-    slack.postMessage.mockResolvedValue({ ts: "working-ts" });
-    bridge(async hooks => {
-      hooks.onPiEvent?.({ type: "agent_progress", text: "Потрібно уточнити цілі." });
-      throw new Error("PRIVATE_EXCEPTION_TRACE");
-    }, mode);
-    await directMessage();
-    const receipt = (slack.progressUpdate.mock.lastCall?.[0] as { text: string }).text;
-    expect(receipt).toContain("Потрібно уточнити цілі");
-    expect(receipt).toContain("Код звернення:");
-    expect(receipt).not.toContain("PRIVATE_EXCEPTION_TRACE");
-    expect(slack.update).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith("slack_message_failed", expect.anything());
+  it("keeps a real failure in the work thread without revealing its private exception", async () => {
+    await setup(async () => { throw new Error("PRIVATE_EXCEPTION"); });
+    await delivered(route("message", "Failed"));
+    expect(slack.post).toHaveBeenCalledWith(expect.objectContaining({ thread_ts: "2.1", text: expect.stringContaining("Pi не завершив запит") }));
+    expect(slack.update).toHaveBeenLastCalledWith(expect.objectContaining({ ts: "2.1", text: expect.stringMatching(/^❌/u) }));
+    expect(JSON.stringify(slack.post.mock.calls)).not.toContain("PRIVATE_EXCEPTION");
   });
 
-  it("reports a delivery failure in the receipt without claiming that Pi failed", async () => {
-    slack.postMessage
-      .mockResolvedValueOnce({ ts: "working-ts" })
-      .mockRejectedValueOnce(new Error("msg_too_long"))
-      .mockResolvedValue({ ts: "notice-ts" });
-    bridge(async (hooks) => {
-      hooks.onPiEvent?.({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash" });
-      hooks.onPiEvent?.({ type: "tool_execution_end", toolCallId: "c1", toolName: "bash" });
-      return "Deployment finished.";
+  it("settles a failed turn before its follow-up takes over the same heading", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const prompt = vi.fn<PiPromptRunner["prompt"]>(async (_key, _owner, text) => {
+      if (text.includes("Перевірка")) {
+        await gate;
+        throw new Error("turn failed");
+      }
+      return result("Виконано після уточнення.");
     });
-
-    await directMessage();
-
-    expect(slack.update).not.toHaveBeenCalled();
-    const receipt = (slack.progressUpdate.mock.lastCall?.[0] as { text: string }).text;
-    expect(receipt).toMatch(
-      /^:warning: Pi completed, but Slack rejected part 1 of 1 · `bash` × 1\n\n_Reference: [0-9a-f-]{36}_$/u,
-    );
-    expect(receipt).not.toContain("could not complete");
-    expect(logger.error).toHaveBeenCalledWith(
-      "slack_response_delivery_failed",
-      expect.objectContaining({ postedParts: 0, totalParts: 1 }),
-    );
-  });
-
-  it("still reports a real Pi failure as a failed request", async () => {
-    slack.postMessage.mockResolvedValue({ ts: "working-ts" });
-    bridge(async () => {
-      throw new Error("model unavailable");
-    });
-
-    await directMessage();
-
-    const updates = slack.update.mock.calls.map(([call]) => (call as { text: string }).text);
-    expect(updates).toEqual([
-      expect.stringContaining("Pi could not complete this request."),
-    ]);
-  });
-
-  it("posts the final answer before settling the placeholder", async () => {
-    slack.postMessage.mockResolvedValue({ ts: "working-ts" });
-    bridge(async () => "All green.");
-
-    await directMessage();
-
-    expect(slack.progressUpdate).toHaveBeenLastCalledWith(
-      expect.objectContaining({ ts: "working-ts", text: ":white_check_mark: *Pi completed*" }),
-    );
-    expect(slack.postMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        text: "All green.",
-        thread_ts: "1.1",
-        unfurl_links: false,
-        unfurl_media: false,
-      }),
-    );
-    const answerOrder = slack.postMessage.mock.invocationCallOrder.at(-1)!;
-    const receiptOrder = slack.progressUpdate.mock.invocationCallOrder.at(-1)!;
-    expect(answerOrder).toBeLessThan(receiptOrder);
-    expect(slack.update).not.toHaveBeenCalled();
-  });
-
-  it("delivers the answer before waiting for a rate-limited receipt", async () => {
-    vi.useFakeTimers();
-    try {
-      slack.postMessage.mockResolvedValue({ ts: "working-ts" });
-      slack.progressUpdate.mockRejectedValueOnce(Object.assign(new Error("rate limited"), {
-        code: "slack_webapi_rate_limited_error",
-        retryAfter: 30,
-      }));
-      bridge(async () => "All green.");
-
-      const handling = directMessage();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(slack.postMessage).toHaveBeenLastCalledWith(
-        expect.objectContaining({ text: "All green." }),
-      );
-      expect(slack.progressUpdate).toHaveBeenCalledTimes(1);
-
-      await vi.advanceTimersByTimeAsync(29_999);
-      expect(slack.progressUpdate).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
-      await handling;
-      expect(slack.progressUpdate).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("still delivers the answer when the placeholder post fails", async () => {
-    slack.postMessage
-      .mockRejectedValueOnce(new Error("ratelimited"))
-      .mockResolvedValue({ ts: "answer-ts" });
-    bridge(async () => "All green.");
-
-    await directMessage();
-
-    expect(logger.warn).toHaveBeenCalledWith(
-      "slack_placeholder_failed",
-      expect.objectContaining({ agentId: "deploy", eventId: "Ev01" }),
-    );
-    expect(slack.postMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ text: "All green.", thread_ts: "1.1" }),
-    );
-    expect(slack.progressUpdate).not.toHaveBeenCalled();
-  });
-
-  it("posts a thread line for a Pi failure without a placeholder", async () => {
-    slack.postMessage
-      .mockRejectedValueOnce(new Error("ratelimited"))
-      .mockResolvedValue({ ts: "failure-ts" });
-    bridge(async () => {
-      throw new Error("model unavailable");
-    });
-
-    await directMessage();
-
-    expect(slack.update).not.toHaveBeenCalled();
-    expect(slack.postMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        thread_ts: "1.1",
-        text: expect.stringMatching(/^:x: Pi could not complete this request\. Reference: /u),
-      }),
-    );
+    await setup(prompt);
+    const first = route("message", "First");
+    await vi.advanceTimersByTimeAsync(10_000);
+    const next = route("message", "Second", { thread_ts: "2.1", ts: "2.9", text: "Уточнення" });
+    release();
+    await delivered(Promise.all([first, next]).then(() => undefined));
+    const titles = slack.update.mock.calls.filter(([payload]) => payload.ts === "2.1").map(([payload]) => payload.text);
+    expect(titles).toEqual(["❌ Перевірка · Запит не завершено", "🔄 Перевірка · У роботі", "✅ Перевірка · Завершено"]);
   });
 });

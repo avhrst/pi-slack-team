@@ -16,10 +16,7 @@ The MVP therefore defaults to:
 - manager channel observation is an explicit opt-in and is limited to Slack channels the app joined;
 - a required explicit Slack user allowlist for DMs, mentions, and manager observations;
 - one Slack app per Unix agent;
-- Slack progress defaults to visible assistant text and tool names only;
-- `progressMode: console` is the default and exposes commands/paths plus compact tool previews to readers of the thread; select `summary` to hide tool details;
-- `progressMode: raw` is an explicit per-agent opt-in that exposes bounded tool arguments and output in the authorized conversation, with an automatic summary fallback when Slack rejects a detailed update;
-- private model thinking is never sent to Slack in either progress mode;
+- Slack progress includes public assistant commentary, localized action names, and validated counters. Tool arguments, arbitrary tool output, and private model thinking are excluded;
 - model output, Pi dialog text, and delegated task bodies are posted with Slack's `&`, `<`, `>` escaped, so they cannot ping `<!channel>`, mention users, or emit raw Slack links, and posts never unfurl; inbound Slack entities are decoded once at parse time, and decoded text cannot close the prompt's untrusted-content wrappers. This is not link-spoof protection: a model-written Markdown link to an http(s) URL still renders with model-chosen label text;
 - ordinary bot-authored channel messages are ignored; only versioned correlated envelopes from exact reciprocal `interAgent.peers` are accepted, and worker responses resolve a pending tool without recursively prompting the manager;
 - ambient manager turns publish no working/progress message and produce no Slack output when the agent selects the silent decision;

@@ -39,6 +39,109 @@ function gate() {
 }
 
 describe("engaged Slack threads", () => {
+  it("publishes one work root and serializes replies from the source and work threads", async () => {
+    const { registry, prompt, service } = setup();
+    const chat = service();
+    const publishing = gate();
+    const delivering = gate();
+    const first = message();
+    const workThreadTs = "103.000";
+    const topic = "Перевірити журнал";
+    const workKey = { ...conversationKey(first), threadTs: workThreadTs };
+    const resolveWorkThread = vi.fn(async () => {
+      await publishing.promise;
+      return { threadTs: workThreadTs, topic };
+    });
+    const onQueued = vi.fn(async () => {
+      expect(registry.threadState(workKey).engaged).toBe(true);
+    });
+    const running = chat.handleMessage(first, {
+      resolveWorkThread,
+      onQueued,
+      preparePrompt: async () => ({ text: "first", contextThroughTs: first.ts }),
+      onCompleted: async () => { await delivering.promise; },
+    });
+    const prepareSource = vi.fn(async () => "second");
+    const sourceReply = chat.handleMessage(message({
+      kind: "channel-message", threadTs: first.ts, eventId: "Ev2", ts: "102.000",
+    }), { resolveWorkThread, preparePrompt: prepareSource });
+    await expect(chat.handleMessage(first, { resolveWorkThread })).resolves.toEqual({ type: "duplicate" });
+    publishing.release();
+    await vi.waitFor(() => expect(onQueued).toHaveBeenCalledWith({
+      isObservation: false, waiting: false, threadTs: workThreadTs, workThread: true,
+      workThreadCreated: true, workThreadTopic: topic,
+    }));
+    const prepareWork = vi.fn(async () => ({ text: "third", contextThroughTs: "104.000" }));
+    const onWorkQueued = vi.fn(async () => undefined);
+    const workReply = chat.handleMessage(message({
+      kind: "channel-message", threadTs: workThreadTs, eventId: "Ev3", ts: "104.000", userId: "U02",
+    }), { resolveWorkThread, onQueued: onWorkQueued, preparePrompt: prepareWork });
+    await vi.waitFor(() => expect(onWorkQueued).toHaveBeenCalledWith({
+      isObservation: false, waiting: true, threadTs: workThreadTs, workThread: true,
+      workThreadCreated: false, workThreadTopic: topic,
+    }));
+    expect(prepareSource).not.toHaveBeenCalled();
+    expect(prepareWork).not.toHaveBeenCalled();
+    delivering.release();
+    await Promise.all([running, sourceReply, workReply]);
+    expect(resolveWorkThread).toHaveBeenCalledOnce();
+    expect(prompt.mock.calls.map(([key, , text]) => [key, text])).toEqual([
+      [workKey, "first"], [workKey, "second"], [workKey, "third"],
+    ]);
+    expect(prepareSource).toHaveBeenCalledWith({ isNewConversation: false, afterTs: first.ts });
+    expect(prepareWork).toHaveBeenCalledWith({ isNewConversation: false });
+    expect(registry.threadState(workKey).contextTs).toBe("104.000");
+    registry.pruneEvents(new Date("2126-01-01"));
+    await expect(service().handleMessage(first, { resolveWorkThread })).resolves.toEqual({ type: "duplicate" });
+    const onAccepted = vi.fn(async () => undefined);
+    await service().handleMessage(message({
+      kind: "channel-message", threadTs: workThreadTs, eventId: "Ev4", ts: "105.000",
+    }), { resolveWorkThread, onAccepted });
+    expect(onAccepted).toHaveBeenCalledWith({ isObservation: false, threadTs: workThreadTs,
+      workThread: true, workThreadCreated: false, workThreadTopic: topic });
+    expect(resolveWorkThread).toHaveBeenCalledOnce();
+  });
+
+  it("uses distinct DM work roots while retaining the user's Pi session and lane", async () => {
+    const { registry, prompt, service } = setup();
+    const chat = service();
+    const delivering = gate();
+    const first = message({ kind: "direct-message", channelId: "D01", channelType: "im" });
+    const second = { ...first, eventId: "Ev2", ts: "102.000", text: "second" };
+    const resolveWorkThread = vi.fn(async ({ message: incoming }: { message: IncomingSlackMessage }) => ({
+      threadTs: incoming === first ? "101.000" : "103.000", topic: incoming.text,
+    }));
+    const running = chat.handleMessage(first, {
+      resolveWorkThread, onCompleted: async () => { await delivering.promise; },
+    });
+    const onQueued = vi.fn(async () => undefined);
+    const queued = chat.handleMessage(second, { resolveWorkThread, onQueued });
+    await vi.waitFor(() => expect(onQueued).toHaveBeenCalledWith(expect.objectContaining({
+      waiting: true, threadTs: "103.000", workThreadCreated: true,
+    })));
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+    delivering.release();
+    await Promise.all([running, queued]);
+    const firstKey = { ...conversationKey(first), threadTs: "101.000" };
+    const secondKey = { ...conversationKey(second), threadTs: "103.000" };
+    expect(prompt.mock.calls.map(([key]) => key)).toEqual([firstKey, secondKey]);
+    expect(registry.getConversation(firstKey)?.sessionKey).toBe(registry.getConversation(secondKey)?.sessionKey);
+  });
+
+  it("falls back to the source thread when publishing fails and skips ambient or unauthorized requests", async () => {
+    const { prompt, service } = setup("manager");
+    const chat = service();
+    const resolveWorkThread = vi.fn(async () => { throw new Error("Slack unavailable"); });
+    await chat.handleMessage(message({ kind: "channel-message" }), { resolveWorkThread });
+    await chat.handleMessage(message({ eventId: "Ev2", userId: "U99" }), { resolveWorkThread });
+    expect(resolveWorkThread).not.toHaveBeenCalled();
+    const first = message({ eventId: "Ev3", ts: "103.000" });
+    await chat.handleMessage(first, { resolveWorkThread });
+    await chat.handleMessage(message({ eventId: "Ev4", threadTs: first.ts, ts: "104.000" }), { resolveWorkThread });
+    expect(resolveWorkThread).toHaveBeenCalledOnce();
+    expect(prompt.mock.calls.slice(1).map(([key]) => key)).toEqual([conversationKey(first), conversationKey(first)]);
+  });
+
   it.each(["worker", "manager"] as const)("continues a private %s thread for another authorized participant and survives service restart", async (role) => {
     const { registry, prompt, service } = setup(role);
     const first = message({ channelId: "G01", channelType: "group" });

@@ -242,7 +242,7 @@ export class PiSessionPool {
       agentDir: this.#config.pi.agentDir,
       sessionDir: this.#config.pi.sessionDir,
       requestTimeoutMs: this.#config.pi.requestTimeoutMs,
-      ...(["balanced", "informative"].includes(this.#config.slack.progressMode) ? { appendSystemPrompt: PUBLIC_PROGRESS_GUIDANCE } : {}),
+      appendSystemPrompt: PUBLIC_PROGRESS_GUIDANCE,
       ...(interAgentEnvironment
         ? {
             extensionPaths: [INTER_AGENT_EXTENSION_PATH],

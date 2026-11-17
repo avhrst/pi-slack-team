@@ -12,9 +12,11 @@ import {
 import type { Logger } from "../observability/logger.js";
 import type {
   ChatService,
+  MessageHooks,
   MessageDisposition,
 } from "../routing/chat-service.js";
 import type { PiTurnResult, PiUiRequestContext } from "../pi/session-pool.js";
+import { toolActivity } from "../pi/activity-progress.js";
 import { EMPTY_TURN_TEXT } from "../pi/turn-text.js";
 import { matchAutomaticSelect } from "../pi/ui-policy.js";
 import {
@@ -23,8 +25,9 @@ import {
   type IncomingSlackMessage,
 } from "../routing/chat-key.js";
 import { chunkSlackText } from "./chunk-text.js";
-import { SlackConsoleReporter, SlackDeliveryQueue } from "./console-reporter.js";
+import { definiteSlackRejection, SlackDeliveryQueue } from "./console-reporter.js";
 import { SlackConnectionMonitor } from "./connection-monitor.js";
+import { SlackLiveThreadReporter } from "./live-thread-reporter.js";
 import { downloadSlackFiles } from "./file-download.js";
 import {
   parseAppMentionEvent,
@@ -36,20 +39,14 @@ import {
   managerObservationPrompt,
   managerVisibleResponse,
 } from "./manager-mode.js";
-import { toSlackMrkdwn, type DeliveryFailure } from "./pi-progress.js";
-import { SlackProgressReporter } from "./progress-reporter.js";
+import { toSlackMrkdwn, type DeploymentSnapshot } from "./pi-progress.js";
 import { SlackUiBroker } from "./slack-ui.js";
 import { addSlackThreadContext } from "./thread-context.js";
 import type { Registry } from "../storage/registry.js";
 import { SlackDelegationPublisher } from "./delegation-publisher.js";
+import { createSlackWorkThread, slackWorkTopic, SlackWorkThread } from "./work-thread.js";
 
 const SLACK_PROGRESS_REQUEST_TIMEOUT_MS = 15_000;
-
-interface DeliveryResult {
-  posted: number;
-  total: number;
-  correlationId?: string;
-}
 
 export class SlackBridge {
   readonly delegations: SlackDelegationPublisher | undefined;
@@ -63,7 +60,8 @@ export class SlackBridge {
   readonly #botToken: string;
   readonly #uiBroker = new SlackUiBroker();
   readonly #deliveryQueue = new SlackDeliveryQueue();
-  readonly #consoleReporters = new Set<SlackConsoleReporter>();
+  readonly #liveReporters = new Set<SlackLiveThreadReporter>();
+  readonly #activeWorkThreads = new Map<string, { thread: SlackWorkThread; reporter: SlackLiveThreadReporter }>();
   readonly #delegatedTurns = new Map<string, number>();
   #botUserId: string | undefined;
 
@@ -115,7 +113,7 @@ export class SlackBridge {
       });
     });
     this.#registerListeners();
-    if (registry) this.delegations = new SlackDelegationPublisher(config, registry, this.#deliveryQueue, (channel, thread) => ({
+    if (registry) this.delegations = new SlackDelegationPublisher(registry, this.#deliveryQueue, (channel, thread) => ({
       post: async text => {
         const result = await this.#progressClient.chat.postMessage({ channel, thread_ts: thread, text, unfurl_links: false, unfurl_media: false });
         if (!result.ts) throw new Error("Slack did not return a message timestamp");
@@ -156,7 +154,7 @@ export class SlackBridge {
     this.#uiBroker.cancelAll();
     this.#deliveryQueue.close();
     await this.delegations?.close();
-    await Promise.allSettled([...this.#consoleReporters].map((reporter) => reporter.close()));
+    await Promise.allSettled([...this.#liveReporters].map((reporter) => reporter.close()));
     await this.#app.stop();
   }
 
@@ -183,15 +181,35 @@ export class SlackBridge {
     ) {
       return { cancelled: true };
     }
-    return this.#uiBroker.request(context, async (text) => {
-      await this.#app.client.chat.postMessage({
-        unfurl_links: false,
-        unfurl_media: false,
-        channel: context.conversation.channelId,
-        thread_ts: context.conversation.threadTs,
-        text,
-      });
+    const work = this.#activeWorkThreads.get(key);
+    let pending = true;
+    let waiting: Promise<void> | undefined;
+    const reportStatusError = (error: unknown): void => this.#logger.warn("slack_dialog_status_failed", {
+      agentId: this.#config.agentId, error,
     });
+    try {
+      return await this.#uiBroker.request(context, async (text) => {
+        await this.#app.client.chat.postMessage({
+          unfurl_links: false,
+          unfurl_media: false,
+          channel: context.conversation.channelId,
+          thread_ts: context.conversation.threadTs,
+          text,
+        });
+        if (work) {
+          waiting = work.reporter.pause().then(async () => {
+            if (pending && !context.signal.aborted) await work.thread.waitingForInput();
+          }).catch(reportStatusError);
+        }
+      });
+    } finally {
+      pending = false;
+      if (work && waiting) void waiting.then(async () => {
+        if (context.signal.aborted) return;
+        await work.thread.running();
+        work.reporter.resume();
+      }).catch(reportStatusError);
+    }
   }
 
   #registerListeners(): void {
@@ -273,237 +291,192 @@ export class SlackBridge {
       ? serializeConversationKey(conversationKey(message))
       : undefined;
     let delegatedAccepted = false;
-    let workingTs: string | undefined;
-    let progressUpdateSequence = 0;
-    const progress = new SlackProgressReporter(
-      this.#config.slack.progressMode === "console" ? "summary" : this.#config.slack.progressMode,
-      async (text) => {
-        if (!workingTs) return;
-        const updateSequence = ++progressUpdateSequence;
-        const startedAt = Date.now();
-        await this.#progressClient.chat.update({
-          channel: message.channelId,
-          ts: workingTs,
-          text,
-        });
-        this.#logger.debug("slack_progress_updated", {
-          agentId: this.#config.agentId,
-          eventId: message.eventId,
-          updateSequence,
-          durationMs: Date.now() - startedAt,
-        });
-      },
-      (error, updateAttempt) => {
-        this.#logger.warn("slack_progress_update_failed", {
-          agentId: this.#config.agentId,
-          eventId: message.eventId,
-          progressMode: this.#config.slack.progressMode,
-          updateAttempt,
-          updateSequence: progressUpdateSequence,
-          error,
-        });
-      },
-    );
-    const consoleReporter = this.#config.slack.progressMode === "console"
-      ? new SlackConsoleReporter(this.#deliveryQueue, {
-          post: async (text) => {
-            const posted = await this.#progressClient.chat.postMessage({
-              unfurl_links: false, unfurl_media: false,
-              channel: message.channelId, thread_ts: message.threadTs ?? message.ts, text,
-            });
-            if (!posted.ts) throw new Error("Slack did not return a message timestamp");
-            return posted.ts;
-          },
-          update: async (ts, text) => {
-            await this.#progressClient.chat.update({ channel: message.channelId, ts, text });
-          },
-          remove: async (ts) => {
-            await this.#progressClient.chat.delete({ channel: message.channelId, ts });
-          },
-        }, (error) => this.#logger.warn("slack_console_delivery_failed", {
-          agentId: this.#config.agentId, eventId: message.eventId, error,
-        }))
-      : undefined;
-    if (consoleReporter) this.#consoleReporters.add(consoleReporter);
+    let threadTs = message.threadTs ?? message.ts;
+    let workThread: SlackWorkThread | undefined;
+    let activeWorkKey: string | undefined;
+    let live: SlackLiveThreadReporter | undefined;
+    const finishedSteps = new Map<string, boolean>();
     let acknowledgementAttempted = false;
-    const acknowledge = async (context: { isObservation: boolean; waiting?: boolean }): Promise<void> => {
+    const reportError = (error: unknown): void => this.#logger.warn("slack_work_thread_delivery_failed", {
+      agentId: this.#config.agentId, eventId: message.eventId, threadTs, error,
+    });
+    const acknowledge: NonNullable<MessageHooks["onQueued"]> = async (context) => {
       managerObservation = context.isObservation;
       if (managerObservation || acknowledgementAttempted) return;
       acknowledgementAttempted = true;
-      const queuedText = context.waiting
-        ? ":hourglass_flowing_sand: Запит отримано й поставлено в чергу. Агент ще обробляє попередній запит; відповість після його завершення."
-        : undefined;
-      if (consoleReporter) {
-        await consoleReporter.start(this.#config.pi.transport === "tmux" || Boolean(context.waiting), queuedText);
-        return;
-      }
-      try {
-        const posted = await client.chat.postMessage({
+      if (context.threadTs && context.workThread) {
+        threadTs = context.threadTs;
+        workThread = new SlackWorkThread(this.#progressClient, this.#deliveryQueue, message, threadTs, {
+          ...(context.workThreadTopic ? { topic: context.workThreadTopic } : {}),
+          onError: reportError,
+        });
+        await workThread.acknowledge(context.waiting, Boolean(context.workThreadCreated)).catch(reportError);
+      } else if (context.waiting && !delegatedRequest) {
+        await this.#deliveryQueue.send("post", () => this.#progressClient.chat.postMessage({
+          channel: message.channelId, thread_ts: threadTs,
+          text: "⏳ Запит отримано й поставлено в чергу. Агент ще обробляє попередній запит.",
           unfurl_links: false, unfurl_media: false,
-          channel: message.channelId, thread_ts: message.threadTs ?? message.ts,
-          text: queuedText ?? (this.#config.pi.transport === "tmux"
-            ? ":hourglass_flowing_sand: Queued for the agent…" : ":hourglass_flowing_sand: Working…"),
-        });
-        workingTs = posted.ts;
-      } catch (error) {
-        this.#logger.warn("slack_placeholder_failed", {
-          agentId: this.#config.agentId, eventId: message.eventId, error,
-        });
+        }), undefined, true).catch(reportError);
       }
+    };
+    const openLive = (): SlackLiveThreadReporter => {
+      if (!live) {
+        live = new SlackLiveThreadReporter({
+          client: this.#progressClient, queue: this.#deliveryQueue, message, threadTs,
+          nativeStreaming: Boolean(workThread) && !delegatedRequest, onError: reportError,
+        });
+        this.#liveReporters.add(live);
+      }
+      return live;
     };
     let finalized = false;
     const finishResponse = async (result: PiTurnResult): Promise<void> => {
       finalized = true;
-      const childDelivery = result.runId ? await this.delegations?.finishParent(result.runId) : true;
-      let responseText = managerObservation
-        ? managerVisibleResponse(result.text)
-        : result.text;
-      if (childDelivery === false) {
-        const notice = "Worker завершив роботу, але доставка його стрічки перервана. Результат доступний менеджеру; вже виконані дії не повторювалися.";
-        if (consoleReporter) consoleReporter.record({ type: "public_notice", text: notice });
-        else responseText += `\n\n${notice}`;
-      }
-      if (!responseText) {
-        await progress.close();
-        this.#logger.info("manager_observation_silent", {
-          agentId: this.#config.agentId,
-          eventId: message.eventId,
-        });
+      const childDelivery = !result.runId || await this.delegations?.finishParent(result.runId).catch((error: unknown) => {
+        reportError(error);
+        return false;
+      }) !== false;
+      const responseText = managerObservation ? managerVisibleResponse(result.text) : result.text;
+      if (managerObservation) {
+        for (const text of responseText ? chunkSlackText(toSlackMrkdwn(responseText)) : []) {
+          try {
+            await this.#deliveryQueue.send("post", () => this.#progressClient.chat.postMessage({
+              channel: message.channelId, thread_ts: threadTs, text,
+              unfurl_links: false, unfurl_media: false,
+            }), undefined, true);
+          } catch (error) {
+            reportError(error);
+            break;
+          }
+        }
         return;
       }
 
-      if (consoleReporter) {
-        try {
-          await consoleReporter.complete(responseText, Boolean(delegatedRequest));
-        } catch (error) {
-          const correlationId = crypto.randomUUID();
-          this.#logger.error("slack_response_delivery_failed", {
-            agentId: this.#config.agentId, eventId: message.eventId, correlationId, error,
-          });
-          await client.chat.postMessage({
-            unfurl_links: false, unfurl_media: false,
-            channel: message.channelId, thread_ts: message.threadTs ?? message.ts,
-            text: `Pi completed this request, but Slack delivery was interrupted. Verify the result before repeating actions. Reference: ${correlationId}`,
-          }).catch(() => undefined);
-        }
-        if (!delegatedRequest) return;
-      }
-
-      // The answer goes out before the placeholder update, which may wait out
-      // Slack rate limits; the placeholder is settled even if delivery throws.
-      let delivery: DeliveryResult | undefined;
+      const reporter = openLive();
+      if (!childDelivery) reporter.record({
+        type: "public_notice",
+        text: "⚠️ Профільний агент завершив роботу. Доставку його стрічки перервано.",
+      });
+      let responseDelivered = true;
       try {
-        const renderedResponse = toSlackMrkdwn(responseText);
-        const outputChunks = delegatedRequest
-          ? delegationResponseMessages(delegatedRequest, renderedResponse)
-          : chunkSlackText(renderedResponse);
-        if (outputChunks.length === 0) outputChunks.push(EMPTY_TURN_TEXT);
-        delivery = await this.#deliverResponse(
-          message,
-          client,
-          workingTs,
-          delegatedRequest,
-          outputChunks,
-          Boolean(consoleReporter),
-        );
+        if (delegatedRequest) {
+          await reporter.finishProgress().catch(reportError);
+          await this.#deliverDelegationResponse(message, client, delegatedRequest, responseText || EMPTY_TURN_TEXT);
+        } else {
+          await reporter.complete(responseText || EMPTY_TURN_TEXT);
+        }
+      } catch (error) {
+        responseDelivered = false;
+        const correlationId = crypto.randomUUID();
+        this.#logger.error("slack_response_delivery_failed", {
+          agentId: this.#config.agentId, eventId: message.eventId, correlationId, error,
+        });
+        await this.#deliveryQueue.send("post", () => this.#progressClient.chat.postMessage({
+          channel: message.channelId, thread_ts: threadTs,
+          text: `⚠️ Pi завершив роботу. Доставку результату в Slack перервано. Код звернення: ${correlationId}`,
+          unfurl_links: false, unfurl_media: false,
+        }), undefined, true).catch(reportError);
       } finally {
-        if (workingTs) await progress.complete(deliveryFailure(delivery));
-        else await progress.close();
+        const snapshot = reporter.deployment;
+        const failedSteps = [...finishedSteps.values()].filter(Boolean).length;
+        const stepSummary = finishedSteps.size ? `Кроків виконано: ${finishedSteps.size} · невдалих: ${failedSteps}` : undefined;
+        const summary = responseDelivered ? deploymentSummary(snapshot) ?? stepSummary : "Доставку результату перервано";
+        await workThread?.complete(summary, !responseDelivered || !childDelivery ||
+          Boolean(snapshot && (snapshot.pending || snapshot.fail || snapshot.warn || snapshot.skip))).catch(reportError);
+      }
+    };
+    let failureReported = false;
+    const failTurn = async (error: unknown): Promise<void> => {
+      if (failureReported) return;
+      failureReported = true;
+      const correlationId = crypto.randomUUID();
+      this.#logger.error("slack_message_failed", {
+        agentId: this.#config.agentId, eventId: message.eventId, correlationId, error,
+      });
+      if (delegatedRequest) {
+        await live?.finishProgress().catch(reportError);
+        await this.#postDelegationError(message, client, delegatedRequest,
+          `Профільний агент не завершив запит. Код звернення: ${correlationId}`);
+      } else if (!managerObservation) {
+        await openLive().fail(`Pi не завершив запит. Код звернення: ${correlationId}`).catch(reportError);
+        await workThread?.fail().catch(reportError);
       }
     };
     try {
-      let disposition: MessageDisposition;
-      try {
-        disposition = await this.#chatService.handleMessage(message, {
-          onQueued: acknowledge,
-          onAccepted: async (context) => {
-            managerObservation = context?.isObservation ?? managerObservation;
-            // Queued delegations must not cancel dialogs in the current human turn.
-            if (delegatedKey) {
-              this.#delegatedTurns.set(delegatedKey, (this.#delegatedTurns.get(delegatedKey) ?? 0) + 1);
-              delegatedAccepted = true;
+      const disposition: MessageDisposition = await this.#chatService.handleMessage(message, {
+        resolveWorkThread: async ({ waiting }) => ({
+          threadTs: await createSlackWorkThread(this.#progressClient, this.#deliveryQueue, message, waiting),
+          topic: slackWorkTopic(message.text),
+        }),
+        onQueued: acknowledge,
+        onAccepted: async (context) => {
+          if (context) await acknowledge({ ...context, waiting: false });
+          if (delegatedKey) {
+            this.#delegatedTurns.set(delegatedKey, (this.#delegatedTurns.get(delegatedKey) ?? 0) + 1);
+            delegatedAccepted = true;
+          }
+          if (!managerObservation) openLive();
+          if (workThread) {
+            activeWorkKey = serializeConversationKey({ ...conversationKey(message), threadTs });
+            this.#activeWorkThreads.set(activeWorkKey, { thread: workThread, reporter: openLive() });
+          }
+          await workThread?.running().catch(reportError);
+        },
+        preparePrompt: async ({ isNewConversation, afterTs }) => {
+          const currentPrompt = delegatedRequest
+            ? delegationPrompt(delegatedRequest)
+            : managerObservation && !this.#config.slack.fileUploads
+              ? managerObservationContent(message)
+              : await downloadSlackFiles(this.#config, message, this.#botToken);
+          let prompt = currentPrompt;
+          let contextThroughTs: string | undefined;
+          if (isNewConversation || message.kind !== "direct-message" || message.threadTs) {
+            try {
+              prompt = await addSlackThreadContext(
+                message,
+                currentPrompt,
+                (arguments_) => client.conversations.replies(arguments_),
+                { ...(afterTs ? { afterTs } : {}), ...(this.#botUserId ? { botUserId: this.#botUserId } : {}) },
+              );
+              contextThroughTs = message.ts;
+            } catch (error) {
+              this.#logger.warn("slack_thread_context_failed", {
+                agentId: this.#config.agentId, eventId: message.eventId, error,
+              });
             }
-            // Keep UI/delegation state changes inside the lane, but reuse the
-            // early acknowledgement instead of posting a second placeholder.
-            await acknowledge({ isObservation: managerObservation });
-          },
-          preparePrompt: async ({ isNewConversation, afterTs }) => {
-            const currentPrompt = delegatedRequest
-              ? delegationPrompt(delegatedRequest)
-              : managerObservation && !this.#config.slack.fileUploads
-                ? managerObservationContent(message)
-                : await downloadSlackFiles(
-                    this.#config,
-                    message,
-                    this.#botToken,
-                  );
-            let prompt = currentPrompt;
-            let contextThroughTs: string | undefined;
-            if (isNewConversation || message.kind !== "direct-message" || message.threadTs) {
-              try {
-                prompt = await addSlackThreadContext(
-                  message,
-                  currentPrompt,
-                  (arguments_) => client.conversations.replies(arguments_),
-                  { ...(afterTs ? { afterTs } : {}), ...(this.#botUserId ? { botUserId: this.#botUserId } : {}) },
-                );
-                contextThroughTs = message.ts;
-              } catch (error) {
-                this.#logger.warn("slack_thread_context_failed", {
-                  agentId: this.#config.agentId,
-                  eventId: message.eventId,
-                  error,
-                });
-              }
-            }
-            return {
-              text: managerObservation ? managerObservationPrompt(message, prompt) : prompt,
-              ...(contextThroughTs ? { contextThroughTs } : {}),
-            };
-          },
-          onPiEvent: (event) => {
-            if (managerObservation) return;
-            if (consoleReporter) consoleReporter.record(event);
-            else progress.record(event);
-          },
-          onCompleted: finishResponse,
-        });
-      } catch (error) {
-        const retainProgress = Boolean(workingTs && ["balanced", "informative"].includes(this.#config.slack.progressMode));
-        if (!retainProgress) await progress.close();
-        if (consoleReporter && !managerObservation) {
-          const correlationId = crypto.randomUUID();
-          this.#logger.error("slack_message_failed", {
-            agentId: this.#config.agentId, eventId: message.eventId, correlationId, error,
-          });
-          await consoleReporter.fail(`Pi could not complete this request. Reference: ${correlationId}`)
-            .catch(() => undefined);
-          if (delegatedRequest) await this.#postDelegationError(
-            message, client, delegatedRequest, `Worker could not complete the request. Reference: ${correlationId}`,
-          );
-          return;
-        }
-        await this.#reportTurnFailure(
-          message,
-          client,
-          workingTs,
-          delegatedRequest,
-          managerObservation,
-          error,
-          retainProgress ? progress : undefined,
-        );
-        return;
-      }
-      if (disposition.type !== "completed") {
-        await progress.close();
-        return;
-      }
-      // Also supports lightweight adapters that don't implement completion hooks.
-      if (!finalized) await finishResponse(disposition.result);
+          }
+          return {
+            text: managerObservation ? managerObservationPrompt(message, prompt) : prompt,
+            ...(contextThroughTs ? { contextThroughTs } : {}),
+          };
+        },
+        onPiEvent: (event) => {
+          if (managerObservation) return;
+          if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+            finishedSteps.set(event.toolCallId, event.isError === true);
+          }
+          const reporter = openLive();
+          const previous = deploymentSummary(reporter.deployment);
+          reporter.record(event);
+          const current = deploymentSummary(reporter.deployment);
+          if (current && current !== previous) void workThread?.updateSummary(current).catch(reportError);
+          else if (!current && event.type === "tool_execution_start") {
+            void workThread?.updateSummary(toolActivity(event.toolName)).catch(reportError);
+          }
+        },
+        onCompleted: finishResponse,
+        onFailed: failTurn,
+      });
+      if (disposition.type === "completed" && !finalized) await finishResponse(disposition.result);
+    } catch (error) {
+      await failTurn(error);
     } finally {
-      if (consoleReporter) {
-        await consoleReporter.close();
-        this.#consoleReporters.delete(consoleReporter);
+      if (activeWorkKey && this.#activeWorkThreads.get(activeWorkKey)?.thread === workThread) {
+        this.#activeWorkThreads.delete(activeWorkKey);
+      }
+      if (live) {
+        await live.close();
+        this.#liveReporters.delete(live);
       }
       if (delegatedKey && delegatedAccepted) {
         const remaining = (this.#delegatedTurns.get(delegatedKey) ?? 1) - 1;
@@ -513,117 +486,28 @@ export class SlackBridge {
     }
   }
 
-  async #reportTurnFailure(
+  async #deliverDelegationResponse(
     message: IncomingSlackMessage,
     client: App["client"],
-    workingTs: string | undefined,
-    delegatedRequest: IncomingDelegationRequest | undefined,
-    managerObservation: boolean,
-    error: unknown,
-    progress?: SlackProgressReporter,
+    request: IncomingDelegationRequest,
+    response: string,
   ): Promise<void> {
-    const correlationId = crypto.randomUUID();
-    this.#logger.error("slack_message_failed", {
-      agentId: this.#config.agentId,
-      eventId: message.eventId,
-      correlationId,
-      error,
-    });
-    if (workingTs && progress) {
-      await progress.fail(correlationId);
-    } else if (workingTs) {
-      await client.chat
-        .update({
-          channel: message.channelId,
-          ts: workingTs,
-          text: `Pi could not complete this request. Reference: ${correlationId}`,
-        })
-        .catch(() => undefined);
-    } else if (!managerObservation && !delegatedRequest) {
-      // Without a placeholder the human would otherwise see no outcome at all.
-      await client.chat
-        .postMessage({
-          unfurl_links: false,
-          unfurl_media: false,
-          channel: message.channelId,
-          thread_ts: message.threadTs ?? message.ts,
-          text: `:x: Pi could not complete this request. Reference: ${correlationId}`,
-        })
-        .catch(() => undefined);
-    }
-    if (delegatedRequest) {
-      await this.#postDelegationError(
-        message,
-        client,
-        delegatedRequest,
-        `Worker could not complete the delegated request. Reference: ${correlationId}`,
-      );
-    }
-  }
-
-  /**
-   * Pi has already finished when this runs. A delivery failure must never be
-   * reported as a turn failure: that invites a retry which replays tools.
-   */
-  async #deliverResponse(
-    message: IncomingSlackMessage,
-    client: App["client"],
-    workingTs: string | undefined,
-    delegatedRequest: IncomingDelegationRequest | undefined,
-    texts: string[],
-    consoleDelivery = false,
-  ): Promise<DeliveryResult> {
     let posted = 0;
     try {
-      for (const text of texts) {
-        const payload = {
-          unfurl_links: false,
-          unfurl_media: false,
-          channel: message.channelId,
-          thread_ts: message.threadTs ?? message.ts,
-          text,
-        };
-        if (consoleDelivery) {
-          await this.#deliveryQueue.send("post", () => this.#progressClient.chat.postMessage(payload));
-        } else {
-          await client.chat.postMessage(payload);
-        }
-        posted += 1;
+      for (const text of delegationResponseMessages(request, toSlackMrkdwn(response))) {
+        await this.#deliveryQueue.send("post", () => this.#progressClient.chat.postMessage({
+          channel: message.channelId, thread_ts: message.threadTs ?? message.ts, text,
+          unfurl_links: false, unfurl_media: false,
+        }), undefined, true);
+        posted++;
       }
-      return { posted, total: texts.length };
     } catch (error) {
-      const correlationId = crypto.randomUUID();
-      this.#logger.error("slack_response_delivery_failed", {
-        agentId: this.#config.agentId,
-        eventId: message.eventId,
-        correlationId,
-        postedParts: posted,
-        totalParts: texts.length,
-        error,
-      });
-      // A placeholder reports the failure in its receipt; keep its tools line.
-      if (!workingTs) {
-        const notice = `:warning: Pi completed this request, but Slack did not accept part ${posted + 1} of ${texts.length} of the response. Reference: ${correlationId}`;
-        await client.chat
-          .postMessage({
-            unfurl_links: false,
-            unfurl_media: false,
-            channel: message.channelId,
-            thread_ts: message.threadTs ?? message.ts,
-            text: notice,
-          })
-          .catch(() => undefined);
+      // Do not send a conflicting envelope if Slack may already have a result.
+      if (!posted && definiteSlackRejection(error)) {
+        await this.#postDelegationError(message, client, request,
+          "Роботу завершено. Slack відхилив відповідь. Перевірте результат перед повторенням дій.");
       }
-      // A later error envelope would conflict with parts the manager already holds.
-      if (delegatedRequest && posted === 0) {
-        await this.#postDelegationError(
-          message,
-          client,
-          delegatedRequest,
-          `Worker completed the delegated request, but its response could not be posted to Slack. Verify the outcome before repeating any mutating step. Reference: ${correlationId}`,
-        );
-      }
-      return { posted, total: texts.length, correlationId };
+      throw error;
     }
   }
 
@@ -652,14 +536,7 @@ export class SlackBridge {
   }
 }
 
-function deliveryFailure(
-  delivery: DeliveryResult | undefined,
-): DeliveryFailure | undefined {
-  return delivery?.correlationId
-    ? {
-        posted: delivery.posted,
-        total: delivery.total,
-        correlationId: delivery.correlationId,
-      }
-    : undefined;
+function deploymentSummary(snapshot: DeploymentSnapshot | undefined): string | undefined {
+  if (!snapshot) return undefined;
+  return `${snapshot.completed}/${snapshot.planned} операцій · OK ${snapshot.ok} · ⚠️ ${snapshot.warn} · ❌ ${snapshot.fail} · пропущено ${snapshot.skip}`;
 }

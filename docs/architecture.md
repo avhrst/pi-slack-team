@@ -62,7 +62,7 @@ For a root message without `thread_ts`, its own `ts` becomes the Slack thread ro
 
 An authorized mention or trusted delegation persists thread engagement before asynchronous preparation. Existing worker channel conversations are backfilled on upgrade; old manager conversations are not inferred to be engaged. New Pi sessions bootstrap bounded prior thread history; resumed thread turns fetch only messages after the last successfully incorporated timestamp. History remains explicitly untrusted and bounded to 200 messages / 50,000 characters. The current request and this agent's output are excluded. A preparation or Pi failure does not advance the cursor. Preparation, execution and final delivery share the serial lane; dialog replies bypass it.
 
-The default `console` renderer retains visible assistant messages and tool calls in sequence, edits active entries in place, previews the first 10 tool-output lines and reconciles the final answer without a second post. Slack delivery is throttled and obeys full cooldowns. Explicit `summary` and `raw` retain legacy rendering. Delegated RPC turns also stream commentary and tools; their final answer is posted once in the existing correlated response envelope so the manager can consume it. Any streamed draft of that final answer is reconciled before the envelope is posted.
+The registry maps source threads to bot-owned work threads before publishing their links. Each new work thread has a compact summary in its opening message and Slack Agent Sessions title. Public commentary and task cards use the same presentation for RPC and tmux. Slack delivery is throttled and honors cooldowns. Delegated RPC turns post the final answer once in the correlated response envelope.
 
 ## Process model
 

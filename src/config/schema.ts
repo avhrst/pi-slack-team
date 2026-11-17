@@ -51,12 +51,17 @@ export const agentConfigSchema = z
     role: z.enum(["worker", "manager"]).default("worker"),
     expectedUnixUser: z.string().regex(/^[a-z_][a-z0-9_-]*[$]?$/),
     stateDir: absolutePath,
-    slack: z
+    slack: z.preprocess((value) => {
+      if (!value || typeof value !== "object" || !("progressMode" in value)) return value;
+      // Config files from older installations may still contain this retired option.
+      const slack = { ...value };
+      delete slack.progressMode;
+      return slack;
+    }, z
       .object({
         teamId: slackId("T"),
         appId: slackId("A"),
         allowedUserIds: z.array(slackId("[UW]")).min(1),
-        progressMode: z.enum(["console", "summary", "balanced", "informative", "raw"]).default("console"),
         fileUploads: z.boolean().default(false),
         maxFileBytes: z
           .number()
@@ -67,7 +72,7 @@ export const agentConfigSchema = z
         maxFilesPerMessage: z.number().int().min(1).max(10).default(5),
         uploadRetentionDays: z.number().int().min(1).max(365).default(7),
       })
-      .strict(),
+      .strict()),
     pi: z
       .object({
         transport: z.enum(["rpc", "tmux"]).default("rpc"),

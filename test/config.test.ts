@@ -46,7 +46,7 @@ describe("agent config", () => {
   it("applies safe runtime defaults", () => {
     const config = validConfig();
     expect(config.role).toBe("worker");
-    expect(config.slack.progressMode).toBe("console");
+    expect(config.slack).not.toHaveProperty("progressMode");
     expect(config.slack.fileUploads).toBe(false);
     expect(config.slack.maxFileBytes).toBe(20 * 1_024 * 1_024);
     expect(config.slack.maxFilesPerMessage).toBe(5);
@@ -94,13 +94,12 @@ describe("agent config", () => {
     ).toThrow("greater than or equal to the concurrent turn limit");
   });
 
-  it("accepts explicit role and raw progress output", () => {
+  it("ignores the retired Slack output mode in old configs", () => {
     const input = structuredClone(validConfig());
     input.role = "manager";
-    input.slack.progressMode = "raw";
-    const config = agentConfigSchema.parse(input);
+    const config = agentConfigSchema.parse({ ...input, slack: { ...input.slack, progressMode: "raw" } });
     expect(config.role).toBe("manager");
-    expect(config.slack.progressMode).toBe("raw");
+    expect(config.slack).not.toHaveProperty("progressMode");
   });
 
   it("accepts exact automatic selections and rejects ambiguous titles", () => {
@@ -221,7 +220,7 @@ describe("agent config", () => {
         model: "gpt-6.1-sol",
         thinkingLevel: "xhigh",
       });
-      expect(config.slack.progressMode).toBe("informative");
+      expect(config.slack).not.toHaveProperty("progressMode");
     }
   });
 

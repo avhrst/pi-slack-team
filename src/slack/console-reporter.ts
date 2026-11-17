@@ -1,6 +1,44 @@
 import type { RpcRecord } from "../pi/rpc-client.js";
 import { ConsoleTranscript, type ConsoleSnapshot } from "./console-transcript.js";
-import { sleep, transientFailure } from "./progress-reporter.js";
+
+const DEFAULT_RETRY_DELAY_MS = 1_000;
+
+function transientFailure(error: unknown): { retryAfterMs: number } | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as {
+    code?: unknown;
+    retryAfter?: unknown;
+    statusCode?: unknown;
+    data?: { error?: unknown };
+  };
+  const transient =
+    record.code === "slack_webapi_rate_limited_error" ||
+    record.data?.error === "ratelimited" ||
+    record.code === "slack_webapi_request_error" ||
+    (record.code === "slack_webapi_http_error" &&
+      typeof record.statusCode === "number" &&
+      (record.statusCode === 429 || record.statusCode >= 500));
+  if (!transient) return undefined;
+  return {
+    retryAfterMs:
+      typeof record.retryAfter === "number" && record.retryAfter >= 0
+        ? record.retryAfter * 1_000
+        : DEFAULT_RETRY_DELAY_MS,
+  };
+}
+
+function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
 
 /** Shared by all console turns: bound message volume and honor workspace cooldowns. */
 export class SlackDeliveryQueue {

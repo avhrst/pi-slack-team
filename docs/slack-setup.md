@@ -106,7 +106,6 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: console
 
 # Optional manager example. Put the reciprocal manager identity on the worker.
 interAgent:
@@ -203,7 +202,7 @@ systemctl enable --now pi-slack-team@<unix-user>.service
 - Authorized channel mention creates/resumes the correct thread session.
 - An unmentioned reply in an engaged thread resumes the session; an unrelated unmentioned channel message creates no worker session.
 - Pi dialog answers work in that thread without another mention and remain bound to the current requester.
-- Console output retains commentary, tool results and one final answer; long tool results show 10 lines and a hidden-line count.
+- The work thread shows an emoji status and summary in its title, live public commentary, task cards, and one final answer.
 - Unauthorized and ordinary bot-authored messages create no session.
 - A repeated Slack event executes no second Pi turn.
 

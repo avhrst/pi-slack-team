@@ -10,7 +10,6 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: informative
   fileUploads: false
   maxFileBytes: 20971520
   maxFilesPerMessage: 5

@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { RpcRecord } from "../pi/rpc-client.js";
 import { chunkSlackText } from "./chunk-text.js";
+import type { SlackWorkStep } from "./live-thread-reporter.js";
 import { escapeSlackText } from "./mrkdwn.js";
 import { toSlackMrkdwn } from "./pi-progress.js";
 
@@ -9,6 +10,7 @@ const PREVIEW_LINES = 10;
 export type ConsoleEntry =
   | { id: string; kind: "assistant"; text: string; complete: boolean }
   | { id: string; kind: "tool"; name: string; args: unknown; output: string; outputLines?: number; state: "running" | "completed" | "failed" }
+  | { id: string; kind: "public-step"; step: SlackWorkStep; text: string }
   | { id: string; kind: "status"; text: string };
 type Entry = ConsoleEntry;
 export interface ConsoleSnapshot { entries: Entry[]; sequence: number; delegatedTools: Array<[string, string]>; statuses?: Array<[string, string]> }
@@ -47,6 +49,7 @@ function code(text: string): string {
 export class ConsoleTranscript {
   readonly #entries: Entry[] = [];
   readonly #tools = new Map<string, Extract<Entry, { kind: "tool" }>>();
+  readonly #publicSteps = new Map<string, Extract<Entry, { kind: "public-step" }>>();
   readonly #statuses = new Map<string, Extract<Entry, { kind: "status" }>>();
   #sequence = 0;
   #assistant: Extract<Entry, { kind: "assistant" }> | undefined;
@@ -60,6 +63,7 @@ export class ConsoleTranscript {
     for (const pair of snapshot.delegatedTools) this.#delegatedTools.set(...pair);
     for (const entry of this.#entries) {
       if (entry.kind === "tool") this.#tools.set(entry.id.slice(5), entry);
+      if (entry.kind === "public-step") this.#publicSteps.set(entry.id, entry);
       if (entry.kind === "assistant") {
         this.#lastAssistant = entry;
         if (!entry.complete) this.#assistant = entry;
@@ -76,6 +80,22 @@ export class ConsoleTranscript {
   }
 
   record(event: RpcRecord): void {
+    if (event.type === "slack_public_step" && typeof event.id === "string" && typeof event.text === "string") {
+      const data = record(event.step);
+      if (!data || typeof data.id !== "string" || typeof data.title !== "string" || typeof data.detail !== "string" ||
+          (data.status !== "in_progress" && data.status !== "complete" && data.status !== "error")) return;
+      const step: SlackWorkStep = { kind: "step", id: data.id, title: data.title, status: data.status, detail: data.detail };
+      const previous = this.#publicSteps.get(event.id);
+      if (previous) {
+        previous.step = step;
+        previous.text = event.text;
+      } else {
+        const entry = { id: event.id, kind: "public-step" as const, step, text: event.text };
+        this.#entries.push(entry);
+        this.#publicSteps.set(entry.id, entry);
+      }
+      return;
+    }
     if (event.type === "public_notice" && typeof event.text === "string") {
       this.#entries.push({ id: `status-${++this.#sequence}`, kind: "status", text: clean(event.text) });
       return;
@@ -173,6 +193,7 @@ export class ConsoleTranscript {
       let text: string;
       if (entry.kind === "assistant") text = toSlackMrkdwn(entry.text);
       else if (entry.kind === "status") text = escapeSlackText(clean(entry.text));
+      else if (entry.kind === "public-step") text = entry.text;
       else {
         const args = record(entry.args);
         const primary = args?.command ?? args?.path ?? args?.query ?? args?.url;

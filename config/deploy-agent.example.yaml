@@ -10,7 +10,6 @@ slack:
   appId: A0000000000
   allowedUserIds:
     - U0000000000
-  progressMode: informative
   # Requires the files:read scope included in manifests/deploy-agent.yaml.
   fileUploads: true
   maxFileBytes: 20971520

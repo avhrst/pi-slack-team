@@ -26,7 +26,7 @@ Other files in this directory illustrate specialized settings such as bounded fi
 
 ## Team model and output baseline
 
-The specialized `dev-agent`, `deploy-agent`, `msboard-agent`, and `support-agent` examples explicitly select `openai-codex/gpt-6.1-sol`, `pi.thinkingLevel: xhigh`, and `slack.progressMode: informative`. These are team choices, not changes to the schema defaults or the generic manager/worker examples. The selected model must be available and authenticated in each private agent profile.
+The specialized `dev-agent`, `deploy-agent`, `msboard-agent`, and `support-agent` examples explicitly select `openai-codex/gpt-6.1-sol`, and `pi.thinkingLevel: xhigh`. These are team choices for the specialized agents. The selected model must be available and authenticated in each private agent profile.
 
 For an existing installation, merge only these model/output fields into the private YAML. Preserve transport, paths, Slack identities, allowlists, peer ACLs, and credentials; do not replace a live configuration with an example. Restart only the selected idle agents after checking their active requests and queues. Publishing these examples does not apply configuration or restart services.
 
